@@ -1,0 +1,14 @@
+{
+  "name": "savia-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.15.1",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node test/protocol.test.mjs",
+    "audit:static": "node scripts/audit.mjs"
+  },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.29.0", "zod": "4.4.3" },
+  "devDependencies": { "@types/node": "24.13.3", "typescript": "5.9.3" }
+}
