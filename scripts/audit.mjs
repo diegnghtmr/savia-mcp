@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 const root = path.resolve(import.meta.dirname, "..");
 const paths = [".gitignore", ".mise.toml", ".npmrc", "package.json", "pnpm-lock.yaml", "tsconfig.json",
-  "README.md", "scripts/audit.mjs", "src/server.ts", "test/protocol.test.mjs"];
+  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "src/server.ts", "test/protocol.test.mjs"];
 const authored = paths.filter(x => x !== "pnpm-lock.yaml");
 const forbidden = /node:(?:net|http|https|tls|dgram)|\bfetch\s*\(|WebSocket|list_workspaces|transaction|budget|credential|from\s+["'](?:\.\.\/){2,}/i;
 for (const name of paths) if (!fs.existsSync(path.join(root, name))) throw Error(`missing:${name}`);
