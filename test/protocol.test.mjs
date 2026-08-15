@@ -7,8 +7,15 @@ import { createHash } from "node:crypto";
 
 const root = path.resolve(import.meta.dirname, ".."), server = path.join(root, "dist/server.js");
 const digest = p => createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-const parent = path.resolve(root, ".."), sibling = path.join(parent, "sibling/sentinel"), sentinel = path.join(parent, "parent-sentinel");
-const before = [sibling, sentinel].map(digest), groups = new Set(), suiteTimer = setTimeout(() => process.exit(124), 20_000);
+const parent = path.resolve(root, "..");
+// SC-02 used to hash two sentinel files a past session had left in the parent
+// by hand. They were never committed — they could not be, they live outside
+// this repository — so the suite crashed on its first line anywhere they were
+// absent, which is everywhere but that one machine. Reading what the workspace
+// actually holds needs no fixture and still fails the moment the server adds,
+// removes, or rewrites anything beside its own repository.
+const workspace = () => fs.readdirSync(parent, { withFileTypes: true }).map(e => `${e.name}:${e.isFile() ? digest(path.join(parent, e.name)) : e.isDirectory() ? "dir" : "other"}`).sort();
+const before = workspace(), groups = new Set(), suiteTimer = setTimeout(() => process.exit(124), 20_000);
 const init = v => ({ jsonrpc: "2.0", id: "init-1", method: "initialize", params: {
   protocolVersion: v, capabilities: {}, clientInfo: { name: "harness", version: "1" } } });
 const initialized = { jsonrpc: "2.0", method: "notifications/initialized" };
@@ -39,7 +46,7 @@ function pass(id, name) { groups.add(id); console.log(`${id} ${name} RED→GREEN
 
 async function full(round) {
   assert.equal(root, path.join(parent, "savia-mcp")); pass("SC-01", "Authorized child boundary");
-  assert.deepEqual([sibling, sentinel].map(digest), before); assert.equal(fs.existsSync(path.join(parent, ".git")), false); pass("SC-02", "Forbidden mutation");
+  assert.deepEqual(workspace(), before); assert.equal(fs.existsSync(path.join(parent, ".git")), false); pass("SC-02", "Forbidden mutation");
   let r = await run([init("2025-11-25"), initialized, { jsonrpc: "2.0", id: "ping-2", method: "ping" }]); let m = json(r);
   assert.deepEqual(m[0].result.serverInfo, { name: "savia-mcp", version: "0.1.0" }); assert.deepEqual(m[1].result, {}); pass("SC-03", "Successful lifecycle");
   const spaced = fs.mkdtempSync(path.join(root, "encoded space-")); fs.mkdirSync(path.join(spaced, "dist")); fs.copyFileSync(server, path.join(spaced, "dist/server.js")); fs.copyFileSync(path.join(root, "package.json"), path.join(spaced, "package.json"));
@@ -57,9 +64,9 @@ async function full(round) {
   for (const [signal,code] of [["SIGINT",130],["SIGTERM",143]]) { r=await run([],false,signal); assert.deepEqual(r.status,{code,sig:null}); } pass("SC-14", "Signals");
   r = await run([],false,undefined,80,[process.execPath,"-e","setInterval(()=>{},1000)"]); assert.equal(r.status.message,"deadline"); pass("SC-15", "Hung cleanup");
   r = await run([],true,undefined,1800,[process.execPath,path.join(root,"scripts/audit.mjs")]); assert.deepEqual(r.status,{code:0,sig:null}); const audit=JSON.parse(r.stdout); assert.equal(audit.audit,"static-clean"); pass("SC-16", "Forbidden dependency or effect");
-  assert.deepEqual([sibling,sentinel].map(digest),before); pass("SC-17", `Repeatable harness round ${round}`);
+  assert.deepEqual(workspace(), before); pass("SC-17", `Repeatable harness round ${round}`);
   assert.ok(audit.authoredLines <= 340); pass("SC-18", "Budget and claim limits");
 }
 await full(1); await full(2); clearTimeout(suiteTimer);
-assert.equal(groups.size,18); assert.deepEqual([sibling,sentinel].map(digest),before);
+assert.equal(groups.size,18); assert.deepEqual(workspace(), before);
 console.log(JSON.stringify({ rounds:2, scenarios:18, residue:false }));
