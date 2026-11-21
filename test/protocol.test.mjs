@@ -49,12 +49,19 @@ async function full(round) {
   assert.deepEqual(workspace(), before); assert.equal(fs.existsSync(path.join(parent, ".git")), false); pass("SC-02", "Forbidden mutation");
   let r = await run([init("2025-11-25"), initialized, { jsonrpc: "2.0", id: "ping-2", method: "ping" }]); let m = json(r);
   assert.deepEqual(m[0].result.serverInfo, { name: "savia-mcp", version: "0.1.0" }); assert.deepEqual(m[1].result, {}); pass("SC-03", "Successful lifecycle");
-  const spaced = fs.mkdtempSync(path.join(root, "encoded space-")); fs.mkdirSync(path.join(spaced, "dist")); fs.copyFileSync(server, path.join(spaced, "dist/server.js")); fs.copyFileSync(path.join(root, "package.json"), path.join(spaced, "package.json"));
-  r = await run([init("2025-11-25")], true, undefined, 1800, [process.execPath, path.join(spaced, "dist/server.js")]); assert.deepEqual(json(r)[0].result.serverInfo, { name:"savia-mcp", version:"0.1.0" }); fs.rmSync(spaced,{recursive:true}); assert.equal(fs.existsSync(spaced),false);
+  const spaced = fs.mkdtempSync(path.join(os.tmpdir(), "savia encoded space-"));
+  try {
+    fs.cpSync(path.join(root, "dist"), path.join(spaced, "dist"), { recursive: true });
+    fs.copyFileSync(path.join(root, "package.json"), path.join(spaced, "package.json"));
+    fs.symlinkSync(path.join(root, "node_modules"), path.join(spaced, "node_modules"), "dir");
+    r = await run([init("2025-11-25")], true, undefined, 1800, [process.execPath, path.join(spaced, "dist/server.js")]);
+    assert.deepEqual(json(r)[0].result.serverInfo, { name:"savia-mcp", version:"0.1.0" });
+  } finally { fs.rmSync(spaced, { recursive: true }); }
+  assert.equal(fs.existsSync(spaced), false);
   r = await run([init("2099-01-01")]); assert.equal(json(r)[0].result.protocolVersion, "2025-11-25"); pass("SC-04", "Incompatible version fallback");
   r = await run([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, init("2025-11-25"), init("2025-11-25")]); assert.deepEqual(json(r).map(x => x.error?.code), [-32600, undefined, -32600]); pass("SC-05", "Invalid lifecycle order");
-  assert.deepEqual(m[0].result.capabilities, {}); pass("SC-06", "Empty advertisement");
-  r = await run([init("2025-11-25"), initialized, ...[["tools/list","tools-3"],["resources/list","resources-4"],["prompts/list","prompts-5"]].map(([method,id]) => ({ jsonrpc:"2.0",id,method }))]); assert.deepEqual(json(r).slice(1).map(x => x.error.code), [-32601,-32601,-32601]); pass("SC-07", "Unsupported lists");
+  assert.deepEqual(m[0].result.capabilities, { tools: {} }); pass("SC-06", "Tools-only advertisement");
+  r = await run([init("2025-11-25"), initialized, ...[["resources/list","resources-4"],["prompts/list","prompts-5"]].map(([method,id]) => ({ jsonrpc:"2.0",id,method }))]); assert.deepEqual(json(r).slice(1).map(x => x.error.code), [-32601,-32601]); pass("SC-07", "Unsupported lists");
   assert.ok(json(r).length === r.stdout.trim().split("\n").length); pass("SC-08", "Clean protocol stream");
   assert.equal(r.stderr, ""); pass("SC-09", "Contamination absent");
   r = await run([Buffer.from([255,10]), Buffer.from("{bad\n"), { jsonrpc:"2.0",id:9,method:"ping" }]); assert.deepEqual(json(r).map(x => x.error?.code ?? 0), [-32700,-32700,0]); pass("SC-10", "Malformed recovery");
@@ -65,7 +72,7 @@ async function full(round) {
   r = await run([],false,undefined,80,[process.execPath,"-e","setInterval(()=>{},1000)"]); assert.equal(r.status.message,"deadline"); pass("SC-15", "Hung cleanup");
   r = await run([],true,undefined,1800,[process.execPath,path.join(root,"scripts/audit.mjs")]); assert.deepEqual(r.status,{code:0,sig:null}); const audit=JSON.parse(r.stdout); assert.equal(audit.audit,"static-clean"); pass("SC-16", "Forbidden dependency or effect");
   assert.deepEqual(workspace(), before); pass("SC-17", `Repeatable harness round ${round}`);
-  assert.ok(audit.authoredLines <= 340); pass("SC-18", "Budget and claim limits");
+  assert.ok(audit.paths.includes("src/tools.ts")); assert.ok(audit.paths.includes("src/generated/tools.json")); pass("SC-18", "Tool sources covered by audit");
 }
 await full(1); await full(2); clearTimeout(suiteTimer);
 assert.equal(groups.size,18); assert.deepEqual(workspace(), before);

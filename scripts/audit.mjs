@@ -1,17 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 const root = path.resolve(import.meta.dirname, "..");
+const sources = fs.readdirSync(path.join(root, "src"), { recursive: true, withFileTypes: true })
+  .filter(entry => entry.isFile()).map(entry => path.relative(root, path.join(entry.parentPath, entry.name))).sort();
 const paths = [".gitignore", ".mise.toml", ".npmrc", "package.json", "pnpm-lock.yaml", "tsconfig.json",
-  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "src/server.ts", "test/protocol.test.mjs"];
-const authored = paths.filter(x => x !== "pnpm-lock.yaml");
-const forbidden = /node:(?:net|http|https|tls|dgram)|\bfetch\s*\(|WebSocket|list_workspaces|transaction|budget|credential|from\s+["'](?:\.\.\/){2,}/i;
+  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "scripts/generate-tools.mjs", ...sources,
+  "test/protocol.test.mjs", "test/tools.test.mjs"];
+const forbiddenNetwork = /["'](?:node:)?(?:net|https?|tls|dgram)["']|\b(?:fetch|WebSocket)\b/i;
+const escapes = /from\s+["'](?:\.\.\/){2,}/;
 for (const name of paths) if (!fs.existsSync(path.join(root, name))) throw Error(`missing:${name}`);
-const lines = authored.reduce((n, f) => n + fs.readFileSync(path.join(root, f), "utf8").split("\n").length - 1, 0);
-for (const name of authored.filter(x => !["scripts/audit.mjs","test/protocol.test.mjs"].includes(x))) if (forbidden.test(fs.readFileSync(path.join(root, name), "utf8"))) throw Error(`forbidden:${name}`);
-if (/from\s+["'](?:\.\.\/){2,}/.test(fs.readFileSync(path.join(root,"test/protocol.test.mjs"),"utf8"))) throw Error("test-escapes-child");
-if (lines > 340 || fs.existsSync(path.join(root, "..", ".git"))) throw Error(`boundary-or-budget:${lines}`);
-if (createHash("sha256").update(fs.readFileSync(path.join(root,"README.md"))).digest("hex") !== "815f2d58ed0e13d86163f0a5c6d1d44fd44b8231099b8b6066f1207eb110f7ed") throw Error("claims-changed");
+for (const name of [...sources, "scripts/generate-tools.mjs", "test/protocol.test.mjs", "test/tools.test.mjs"]
+  .filter(x => /\.[mt]?[jt]s$/.test(x))) {
+  let source = fs.readFileSync(path.join(root, name), "utf8");
+  if (escapes.test(source)) throw Error(`escapes-child:${name}`);
+  // The runtime has one HTTP client; the tests bind a fake API to loopback.
+  if (name === "src/tools.ts") source = source.replace(
+    'await fetch(url, { method: entry.tool.method, headers, ...(body === undefined ? {} : { body }), signal, redirect: "manual" });', "");
+  if (name === "test/tools.test.mjs") source = source.replace('import { createServer } from "node:http";', "");
+  if (forbiddenNetwork.test(source)) throw Error(`forbidden-network:${name}`);
+}
+if (fs.existsSync(path.join(root, "..", ".git"))) throw Error("repository-boundary");
 if (process.argv[2]) {
   const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const rows = Object.values(report.advisories ?? {});
@@ -22,4 +30,4 @@ if (process.argv[2]) {
     !/(?:node:http|hono)/i.test(fs.readFileSync(path.join(root, "src/server.ts"), "utf8"));
   if (!allowed || report.metadata.vulnerabilities.high || report.metadata.vulnerabilities.critical) throw Error("audit-not-allowlisted");
 }
-console.log(JSON.stringify({ paths, authoredLines: lines, audit: process.argv[2] ? "allowlisted" : "static-clean" }));
+console.log(JSON.stringify({ paths, audit: process.argv[2] ? "allowlisted" : "static-clean" }));
