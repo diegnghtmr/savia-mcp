@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { parseArgs } from "node:util";
+import { isDeepStrictEqual, parseArgs } from "node:util";
+import { load as loadYaml } from "js-yaml";
 
 const root = resolve(import.meta.dirname, "..");
 const docs = resolve(root, "../../docs");
@@ -22,49 +23,47 @@ function dereference(node, document, refs = []) {
   return { ...dereference(target, document, [...refs, reference]), ...fields };
 }
 
-function generate(document) {
-  const tools = new Map();
+function* toolOperations(document) {
   for (const [path, item] of Object.entries(document.paths)) {
     for (const method of methods) {
       const operation = item[method];
-      const annotation = operation?.["x-savia-mcp-tool"];
-      if (!annotation) continue;
-      const { name, riskClass, requiresApproval, requiredScopes } = annotation;
-      if (tools.has(name)) throw Error(`Duplicate MCP tool: ${name}`);
-      const parameters = new Map();
-      for (const source of [item, operation]) {
-        for (const raw of source.parameters ?? []) {
-          const param = dereference(raw, document);
-          parameters.set(`${param.in}:${param.name}`, param);
-        }
+      if (operation && Object.hasOwn(operation, "x-savia-mcp-tool")) {
+        yield { path, method, item, operation, annotation: operation["x-savia-mcp-tool"] };
       }
-      const request = dereference(operation.requestBody, document);
-      tools.set(name, { name, description: operation.summary, method: method.toUpperCase(), path,
-        parameters: [...parameters.values()], requestSchema: request ? (request.content["application/json"] ?? Object.values(request.content)[0])?.schema ?? null : null,
-        requestRequired: Boolean(request?.required), riskClass, requiresApproval, requiredScopes });
     }
+  }
+}
+
+function generate(document) {
+  const tools = new Map();
+  for (const { path, method, item, operation, annotation } of toolOperations(document)) {
+    if (!annotation) continue;
+    const { name, riskClass, requiresApproval, requiredScopes } = annotation;
+    if (tools.has(name)) throw Error(`Duplicate MCP tool: ${name}`);
+    const parameters = new Map();
+    for (const source of [item, operation]) {
+      for (const raw of source.parameters ?? []) {
+        const param = dereference(raw, document);
+        parameters.set(`${param.in}:${param.name}`, param);
+      }
+    }
+    const request = dereference(operation.requestBody, document);
+    tools.set(name, { name, description: operation.summary, method: method.toUpperCase(), path,
+      parameters: [...parameters.values()], requestSchema: request ? (request.content["application/json"] ?? Object.values(request.content)[0])?.schema ?? null : null,
+      requestRequired: Boolean(request?.required), riskClass, requiresApproval, requiredScopes });
   }
   return tools;
 }
 
-// The JSON twin is generated from the YAML authority; refuse a twin whose tool annotations disagree with it.
-function yamlAnnotations(text) {
-  const found = new Map();
-  const block = /x-savia-mcp-tool:\r?\n( +)name: (\S+)\r?\n\1riskClass: (\S+)\r?\n\1requiresApproval: (\S+)\r?\n\1requiredScopes:( \[\])?\r?\n((?:\1- \S+\r?\n)*)/g;
-  for (const [, , name, riskClass, requiresApproval, empty, scopes] of text.matchAll(block)) {
-    const requiredScopes = empty ? [] : scopes.trim().split(/\r?\n/).map(line => line.trim().slice(2));
-    found.set(name, JSON.stringify({ riskClass, requiresApproval: requiresApproval === "true", requiredScopes }));
-  }
-  return found;
+function annotationsByOperation(document) {
+  return new Map([...toolOperations(document)].map(({ method, path, annotation }) => [`${method} ${path}`, annotation]));
 }
 
-function assertTwinMatchesYaml(tools, yamlPath) {
-  if (!existsSync(yamlPath)) return;
-  const yaml = yamlAnnotations(readFileSync(yamlPath, "utf8"));
-  const json = new Map([...tools.values()].map(({ name, riskClass, requiresApproval, requiredScopes }) =>
-    [name, JSON.stringify({ riskClass, requiresApproval, requiredScopes })]));
-  const differs = yaml.size !== json.size || [...json].some(([name, value]) => yaml.get(name) !== value);
-  if (differs) throw Error("OpenAPI YAML and JSON twin disagree on x-savia-mcp-tool annotations; regenerate the JSON twin.");
+function assertTwinMatchesYaml(document, yamlPath) {
+  const yaml = loadYaml(readFileSync(yamlPath, "utf8"));
+  if (!isDeepStrictEqual(annotationsByOperation(yaml), annotationsByOperation(document))) {
+    throw Error("OpenAPI YAML and JSON twin disagree on x-savia-mcp-tool annotations; regenerate the JSON twin.");
+  }
 }
 
 // Preserve the pinned layout: one record per line, with spaces after structural separators.
@@ -78,24 +77,37 @@ function encode(value) {
 
 function main() {
   const { values } = parseArgs({ options: {
-    openapi: { type: "string", default: process.env.SAVIA_OPENAPI_PATH ?? resolve(docs, "savia-openapi.json") },
-    yaml: { type: "string", default: process.env.SAVIA_OPENAPI_YAML_PATH ?? resolve(docs, "savia-openapi.yaml") },
+    openapi: { type: "string" },
+    yaml: { type: "string" },
     prd: { type: "string", default: process.env.SAVIA_PRD_PATH ?? resolve(docs, "PRD - Savia.md") },
     check: { type: "boolean" }, help: { type: "boolean", short: "h" },
   } });
   if (values.help) {
     console.log("Usage: pnpm tools:generate [--openapi <OpenAPI JSON>] [--yaml <OpenAPI YAML>] [--prd <PRD Markdown>] [--check]\n" +
-      "Generate the pinned manifest or check it without writing. Reports PRD tools missing from OpenAPI.");
+      "Generate the pinned manifest or check it without writing. Reports PRD tools missing from OpenAPI.\n" +
+      "Explicit OpenAPI paths must exist. With no overrides, --check skips when both default OpenAPI files are absent.");
     return;
   }
-  const tools = generate(JSON.parse(readFileSync(values.openapi, "utf8")));
+  const openapiOverride = values.openapi ?? process.env.SAVIA_OPENAPI_PATH;
+  const yamlOverride = values.yaml ?? process.env.SAVIA_OPENAPI_YAML_PATH;
+  const openapiPath = openapiOverride ?? resolve(docs, "savia-openapi.json");
+  const yamlPath = yamlOverride ?? resolve(docs, "savia-openapi.yaml");
+  const hasJson = existsSync(openapiPath);
+  const hasYaml = existsSync(yamlPath);
+  if (values.check && openapiOverride === undefined && yamlOverride === undefined && !hasJson && !hasYaml) return;
+
+  let document;
   try {
-    assertTwinMatchesYaml(tools, values.yaml);
+    if (!hasYaml && yamlOverride !== undefined) throw Error(`OpenAPI YAML file not found: ${yamlPath}`);
+    if (!hasJson) throw Error(`OpenAPI JSON file not found: ${openapiPath}`);
+    document = JSON.parse(readFileSync(openapiPath, "utf8"));
+    if (hasYaml) assertTwinMatchesYaml(document, yamlPath);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
     return;
   }
+  const tools = generate(document);
   const [, section] = readFileSync(values.prd, "utf8").split("FR-MCP-001 — Herramientas", 2);
   const expected = new Set(section?.split("FR-MCP-002", 1)[0].match(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/gm));
   if (!expected.size) throw Error("FR-MCP-001 contains no tool names");

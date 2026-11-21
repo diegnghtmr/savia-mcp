@@ -187,30 +187,79 @@ test("search query length follows the OpenAPI Unicode character limit", async t 
 
 test("manifest check rejects a YAML-only tool annotation change", {
   skip: !existsSync(new URL("../../docs/savia-openapi.yaml", root)),
-}, t => {
+}, async t => {
   const dir = mkdtempSync(join(tmpdir(), "savia-mcp-yaml-drift-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const cwd = join(dir, "generar", "savia-mcp");
   mkdirSync(join(cwd, "src", "generated"), { recursive: true });
   cpSync(new URL("scripts/", root), join(cwd, "scripts"), { recursive: true });
   symlinkSync(fileURLToPath(new URL("node_modules", root)), join(cwd, "node_modules"), "dir");
-  cpSync(new URL("../../docs/", root), join(dir, "docs"), { recursive: true });
   const pinned = join(cwd, "src", "generated", "tools.json");
   const original = readFileSync(new URL("src/generated/tools.json", root));
   writeFileSync(pinned, original);
   const env = { ...process.env };
   delete env.SAVIA_OPENAPI_PATH;
+  delete env.SAVIA_OPENAPI_YAML_PATH;
   delete env.SAVIA_PRD_PATH;
-  const check = () => spawnSync(process.execPath, ["scripts/generate-tools.mjs", "--check"],
-    { cwd, env, encoding: "utf8" });
-  const clean = check();
-  assert.equal(clean.status, 0, clean.stderr);
-  const authority = join(dir, "docs", "savia-openapi.yaml");
+  const check = (...args) => {
+    const result = spawnSync(process.execPath, ["scripts/generate-tools.mjs", "--check", ...args],
+      { cwd, env, encoding: "utf8" });
+    assert.deepEqual(readFileSync(pinned), original);
+    return [result.status, result.stdout, result.stderr];
+  };
+  const report = "PRD tools missing from OpenAPI: get_debt_projection\n";
+  await t.test("skips absent default authorities in a standalone checkout", () => {
+    assert.deepEqual(check(), [0, "", ""]);
+  });
+  const docs = join(dir, "docs");
+  mkdirSync(docs);
+  for (const file of ["savia-openapi.json", "PRD - Savia.md"]) {
+    cpSync(new URL(`../../docs/${file}`, root), join(docs, file));
+  }
+  assert.deepEqual(check(), [0, report, ""], "a missing default YAML still allows checking the JSON manifest");
+  const authority = join(docs, "savia-openapi.yaml");
+  cpSync(new URL("../../docs/savia-openapi.yaml", root), authority);
+  assert.deepEqual(check(), [0, report, ""]);
+
   const yaml = readFileSync(authority, "utf8");
-  const changed = yaml.replace(/(name: list_accounts\r?\n +riskClass: )read/, "$1administrative");
-  assert.notEqual(changed, yaml);
-  writeFileSync(authority, changed);
-  const drift = check();
-  assert.equal(drift.status, 1, `${drift.stdout}${drift.stderr}`);
-  assert.deepEqual(readFileSync(pinned), original);
+  const disagreement = "OpenAPI YAML and JSON twin disagree on x-savia-mcp-tool annotations; regenerate the JSON twin.\n";
+  const blocks = /^ {6}x-savia-mcp-tool:\r?\n(?: {8}[^\r\n]*\r?\n)+/gm;
+  const annotations = [...yaml.matchAll(blocks)].map(m => m[0]);
+  const [accounts, transactions] = ["list_accounts", "search_transactions"]
+    .map(name => annotations.find(block => block.includes(`name: ${name}`)));
+  assert.ok(accounts && transactions);
+  for (const [name, edited] of [
+    ["changed risk class", yaml.replace(/(name: list_accounts\r?\n +riskClass: )read/, "$1administrative")],
+    ["uppercase YAML boolean", yaml.replace(/(name: list_accounts\r?\n +riskClass: read\r?\n +requiresApproval: )false/, "$1TRUE")],
+    ["annotations swapped between operations", yaml.replace(blocks, block => block === accounts ? transactions : block === transactions ? accounts : block)],
+    ["annotation missing from YAML", yaml.replace(accounts, "")],
+    ["extra annotation field", yaml.replace(accounts, `${accounts}        extra: true\n`)],
+  ]) {
+    await t.test(name, () => {
+      assert.notEqual(edited, yaml);
+      writeFileSync(authority, edited);
+      assert.deepEqual(check(), [1, "", disagreement]);
+    });
+  }
+  await t.test("an annotation missing from JSON is drift too", () => {
+    writeFileSync(authority, yaml);
+    const twin = JSON.parse(readFileSync(join(docs, "savia-openapi.json"), "utf8"));
+    delete twin.paths["/v1/accounts"].get["x-savia-mcp-tool"];
+    const altered = join(dir, "altered.json");
+    writeFileSync(altered, JSON.stringify(twin));
+    assert.deepEqual(check("--openapi", altered), [1, "", disagreement]);
+  });
+  await t.test("annotation comment is not drift", () => {
+    const commentOnly = yaml.replace(/(name: list_accounts)(?=\r?\n)/, "$1 # display name");
+    assert.notEqual(commentOnly, yaml);
+    writeFileSync(authority, commentOnly);
+    assert.deepEqual(check(), [0, report, ""]);
+  });
+  for (const [flag, extension] of [["--yaml", "yaml"], ["--openapi", "json"]]) {
+    await t.test(`rejects missing ${flag} override`, () => {
+      writeFileSync(authority, yaml);
+      const absent = join(dir, `absent.${extension}`);
+      assert.deepEqual(check(flag, absent), [1, "", `OpenAPI ${extension.toUpperCase()} file not found: ${absent}\n`]);
+    });
+  }
 });

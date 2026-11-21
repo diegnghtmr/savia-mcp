@@ -18,13 +18,18 @@ pass `idempotencyKey` or let the server generate one. Requests do not follow
 redirects and have a 2-second deadline and a 1 MiB response limit.
 
 Run `pnpm test` and `pnpm run audit:static`. The protocol tests use a loopback
-fake API. The manifest check is skipped in a standalone checkout with no Savia
-authorities; opt in with `SAVIA_OPENAPI_PATH` and `SAVIA_PRD_PATH`. Regenerate
-with `pnpm tools:generate`. The Node script reads `../../docs/savia-openapi.json`,
-the JSON twin regenerated alongside the authoritative YAML, and refuses to run
-when the YAML's `x-savia-mcp-tool` annotations disagree with the twin. Use
-`--openapi`, `--yaml` and `--prd` to override paths, or `--check` to report gaps
-and verify without writing.
+fake API. Regenerate the manifest with `pnpm tools:generate`. The generator
+reads `../../docs/savia-openapi.json`, parses the authoritative YAML when
+present, and compares the full `x-savia-mcp-tool` annotations for each HTTP
+method and path. Comments and formatting don't count as drift.
+
+Use `--openapi`, `--yaml` and `--prd` to override paths (or set
+`SAVIA_OPENAPI_PATH`, `SAVIA_OPENAPI_YAML_PATH` and `SAVIA_PRD_PATH`). An
+explicit OpenAPI path that doesn't exist is an error and leaves the manifest
+unchanged. Use `--check` to report gaps and verify without writing. With no
+OpenAPI overrides, `--check` skips standalone checkouts where both default
+OpenAPI files are absent. If only the default YAML is absent, it still checks
+the manifest against the JSON twin.
 
 Argument validation rejects undeclared properties (including an own `__proto__`
 key), counts string lengths in Unicode characters as OpenAPI does, and exposes

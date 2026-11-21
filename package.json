@@ -11,5 +11,5 @@
     "audit:static": "node scripts/audit.mjs"
   },
   "dependencies": { "@modelcontextprotocol/sdk": "1.29.0", "zod": "4.4.3" },
-  "devDependencies": { "@types/node": "24.13.3", "typescript": "5.9.3" }
+  "devDependencies": { "@types/node": "24.13.3", "js-yaml": "4.3.0", "typescript": "5.9.3" }
 }
