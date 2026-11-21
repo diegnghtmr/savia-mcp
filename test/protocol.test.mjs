@@ -70,7 +70,7 @@ async function full(round) {
   r = await run([]); assert.deepEqual(r.status,{code:0,sig:null}); pass("SC-13", "EOF");
   for (const [signal,code] of [["SIGINT",130],["SIGTERM",143]]) { r=await run([],false,signal); assert.deepEqual(r.status,{code,sig:null}); } pass("SC-14", "Signals");
   r = await run([],false,undefined,80,[process.execPath,"-e","setInterval(()=>{},1000)"]); assert.equal(r.status.message,"deadline"); pass("SC-15", "Hung cleanup");
-  r = await run([],true,undefined,1800,[process.execPath,path.join(root,"scripts/audit.mjs")]); assert.deepEqual(r.status,{code:0,sig:null}); const audit=JSON.parse(r.stdout); assert.equal(audit.audit,"static-clean"); pass("SC-16", "Forbidden dependency or effect");
+  r = await run([],true,undefined,1800,[process.execPath,path.join(root,"scripts/audit.mjs")]); assert.deepEqual(r.status,{code:0,sig:null}); const audit=JSON.parse(r.stdout); assert.equal(audit.audit,"static-clean"); assert.ok(Number.isInteger(audit.authoredLines) && audit.authoredLines > 0); pass("SC-16", "Forbidden dependency or effect");
   assert.deepEqual(workspace(), before); pass("SC-17", `Repeatable harness round ${round}`);
   assert.ok(audit.paths.includes("src/tools.ts")); assert.ok(audit.paths.includes("src/generated/tools.json")); pass("SC-18", "Tool sources covered by audit");
 }

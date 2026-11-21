@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,9 +10,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const root = new URL("../", import.meta.url);
-const missing = ["export_report_pdf", "get_debt_projection", "list_workspaces", "scan_receipt"];
+const missing = ["get_debt_projection"];
 const approvals = ["contribute_to_fund", "create_account", "create_budget", "create_cross_currency_transfer",
-  "create_report_definition", "create_sinking_fund", "create_transaction", "create_transfer", "update_budget",
+  "create_report_definition", "create_sinking_fund", "create_transaction", "create_transfer", "scan_receipt", "update_budget",
   "update_budget_allocations", "update_transaction", "void_transaction"];
 const workspace = "59fd5039-58ea-492a-8404-b02b50671c3a", override = "fac2d19d-4273-4941-a7a2-c0eaebd321e6";
 const id = "94779f05-9dd8-410e-a478-a7666e04d664", key = "f532b1d5-1952-4eb8-8cd1-9a150bff2a06";
@@ -78,9 +78,11 @@ const reads = [
     "POST", "/v1/report-runs"],
   ["list_ai_providers", {}, "GET", "/v1/ai/providers"],
   ["get_forecast", { forecastId: id }, "GET", `/v1/forecasts/${id}`],
+  ["list_workspaces", { limit: 5 }, "GET", "/v1/workspaces?limit=5"],
+  ["export_report_pdf", { reportRunId: id }, "GET", `/v1/report-runs/${id}`],
 ];
 
-test("advertises the 22 annotated tools and sends the exact request for each read", async t => {
+test("advertises the 25 annotated tools and sends the exact request for each read", async t => {
   const { client, call, requests } = await fixture(t);
   assert.deepEqual(client.getServerCapabilities(), { tools: {} });
   const { tools } = await client.listTools();
@@ -94,12 +96,13 @@ test("advertises the 22 annotated tools and sends the exact request for each rea
   for (const [name, args, method, url] of reads) {
     assert.deepEqual(await call(name, args), success, name);
     const request = requests.at(-1);
-    assert.deepEqual(request, { method, url, authorization: `Bearer ${token}`, workspace: args.workspaceId ?? workspace,
+    assert.deepEqual(request, { method, url, authorization: `Bearer ${token}`,
+      workspace: name === "list_workspaces" ? undefined : args.workspaceId ?? workspace,
       key: name === "run_scenario" ? request.key : args.idempotencyKey, contentType: args.body ? "application/json" : undefined,
       accept: "application/json, application/problem+json", body: args.body ? JSON.stringify(args.body) : "" }, name);
     if (name === "run_scenario") assert.match(request.key, /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/u);
   }
-  assert.equal(requests.length, 10);
+  assert.equal(requests.length, 12);
 });
 
 test("approval, unknown tools, and invalid arguments never reach the API", async t => {
@@ -151,4 +154,63 @@ test("maps problems, redacts backend echoes, and bounds redirects, size and time
     ["slow", "Savia API request timed out."], ["invalid", "Savia API returned invalid JSON."]])
     assert.deepEqual(await call("list_accounts", { cursor }), error(text), cursor);
   assert.deepEqual(requests.map(r => r.url), ["problem", "echo", "redirect", "large", "slow", "invalid"].map(v => `/v1/accounts?cursor=${v}`));
+});
+
+test("approval-only tools advertise their optional If-Match parameter", async t => {
+  const { client, requests } = await fixture(t);
+  const { tools } = await client.listTools();
+  for (const name of ["update_budget", "update_budget_allocations", "update_transaction", "void_transaction"]) {
+    const { inputSchema } = tools.find(tool => tool.name === name);
+    assert.equal(inputSchema.properties.ifMatch?.type, "string", name);
+    assert.ok(!inputSchema.required.includes("ifMatch"), name);
+  }
+  assert.deepEqual(requests, []);
+});
+
+test("undeclared own properties are rejected before any HTTP request", async t => {
+  const { call, requests } = await fixture(t);
+  const undeclared = JSON.parse('{"__proto__":{}}');
+  assert.deepEqual(await call("list_accounts", undeclared), error("Invalid tool arguments."));
+  assert.deepEqual(await call("create_forecast", { body: undeclared }), error("Invalid tool arguments."));
+  assert.deepEqual(requests, []);
+});
+
+test("search query length follows the OpenAPI Unicode character limit", async t => {
+  const { call, requests } = await fixture(t);
+  assert.deepEqual(await call("search_transactions", { query: "a".repeat(200) + "🙂" }),
+    error("Invalid tool arguments."));
+  assert.deepEqual(requests, []);
+  const query = "a".repeat(199) + "🙂";
+  assert.deepEqual(await call("search_transactions", { query }), success);
+  assert.deepEqual(requests.map(r => r.url), [`/v1/transactions?query=${encodeURIComponent(query)}`]);
+});
+
+test("manifest check rejects a YAML-only tool annotation change", {
+  skip: !existsSync(new URL("../../docs/savia-openapi.yaml", root)),
+}, t => {
+  const dir = mkdtempSync(join(tmpdir(), "savia-mcp-yaml-drift-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const cwd = join(dir, "generar", "savia-mcp");
+  mkdirSync(join(cwd, "src", "generated"), { recursive: true });
+  cpSync(new URL("scripts/", root), join(cwd, "scripts"), { recursive: true });
+  symlinkSync(fileURLToPath(new URL("node_modules", root)), join(cwd, "node_modules"), "dir");
+  cpSync(new URL("../../docs/", root), join(dir, "docs"), { recursive: true });
+  const pinned = join(cwd, "src", "generated", "tools.json");
+  const original = readFileSync(new URL("src/generated/tools.json", root));
+  writeFileSync(pinned, original);
+  const env = { ...process.env };
+  delete env.SAVIA_OPENAPI_PATH;
+  delete env.SAVIA_PRD_PATH;
+  const check = () => spawnSync(process.execPath, ["scripts/generate-tools.mjs", "--check"],
+    { cwd, env, encoding: "utf8" });
+  const clean = check();
+  assert.equal(clean.status, 0, clean.stderr);
+  const authority = join(dir, "docs", "savia-openapi.yaml");
+  const yaml = readFileSync(authority, "utf8");
+  const changed = yaml.replace(/(name: list_accounts\r?\n +riskClass: )read/, "$1administrative");
+  assert.notEqual(changed, yaml);
+  writeFileSync(authority, changed);
+  const drift = check();
+  assert.equal(drift.status, 1, `${drift.stdout}${drift.stderr}`);
+  assert.deepEqual(readFileSync(pinned), original);
 });

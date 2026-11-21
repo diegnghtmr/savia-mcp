@@ -7,7 +7,7 @@ type Parameter = { in: string; name: string; required?: boolean; schema: Schema;
 type Tool = { name: string; description: string; method: string; path: string; parameters: Parameter[];
   requestSchema: Schema | null; requestRequired: boolean; riskClass: string; requiresApproval: boolean; requiredScopes: string[] };
 type Args = Record<string, unknown>;
-const headersToArgs = new Map([["X-Workspace-Id", "workspaceId"], ["Idempotency-Key", "idempotencyKey"]]);
+const headersToArgs = new Map([["X-Workspace-Id", "workspaceId"], ["Idempotency-Key", "idempotencyKey"], ["If-Match", "ifMatch"]]);
 const argumentName = (p: Parameter) => p.in === "header" ? headersToArgs.get(p.name) : p.name;
 const result = (text: string) => ({ content: [{ type: "text" as const, text }] });
 export const toolError = (text: string) => ({ ...result(text), isError: true });
@@ -27,8 +27,12 @@ function validator(schema: Schema | boolean): z.ZodType {
     return branches ? base.refine(value => branches.filter(branch => branch.safeParse(value).success).length === 1) : base;
   }
   if (schema.format === "date-time") return z.iso.datetime({ offset: true });
-  const { default: _default, ...constraints } = schema;
-  const base = z.fromJSONSchema(constraints);
+  const { default: _default, minLength, maxLength, ...constraints } = schema;
+  let base: z.ZodType = z.fromJSONSchema(constraints);
+  // JSON Schema string lengths count Unicode code points, not UTF-16 code units.
+  if (minLength !== undefined || maxLength !== undefined)
+    base = base.refine(value => typeof value !== "string" ||
+      (Array.from(value).length >= (minLength ?? 0) && Array.from(value).length <= (maxLength ?? Infinity)));
   return schema.uniqueItems ? base.refine(value => Array.isArray(value) && new Set(value).size === value.length) : base;
 }
 
@@ -77,12 +81,19 @@ async function responseText(response: Response): Promise<string | null> {
   } finally { reader.releaseLock(); }
 }
 
+// Own "__proto__" keys survive JSON.parse but are invisible to object-shape validation.
+export function hasPrototypeKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasPrototypeKey);
+  if (value === null || typeof value !== "object") return false;
+  return Object.hasOwn(value, "__proto__") || Object.values(value).some(hasPrototypeKey);
+}
+
 const problem = z.object({ code: z.string().optional(), title: z.string().optional(), detail: z.string().optional() });
 export async function callTool(name: string, args: Args) {
   const entry = catalog.get(name);
   if (!entry) return toolError("Unknown tool.");
   if (!entry.parse) return toolError("requires approval — not available in this version");
-  if (!entry.parse.safeParse(args).success) return toolError("Invalid tool arguments.");
+  if (hasPrototypeKey(args) || !entry.parse.safeParse(args).success) return toolError("Invalid tool arguments.");
   const url = apiUrl(), token = process.env.SAVIA_MCP_TOKEN;
   if (!url || !token || !/^[A-Za-z0-9._~+\/-]+=*$/u.test(token)) return toolError("Savia API configuration is invalid.");
   const headers = new Headers({ Authorization: `Bearer ${token}`, Accept: "application/json, application/problem+json" });
@@ -97,6 +108,8 @@ export async function callTool(name: string, args: Args) {
       headers.set(param.name, String(workspace.data));
     } else if (param.name === "Idempotency-Key" && param.in === "header") {
       headers.set(param.name, String(value ?? randomUUID()));
+    } else if (param.in === "header" && value !== undefined) {
+      headers.set(param.name, String(value));
     } else if (param.in === "path") path = path.replace(`{${param.name}}`, encodeURIComponent(String(value)));
     else if (param.in === "query" && value !== undefined) url.searchParams.set(param.name, String(value));
   }

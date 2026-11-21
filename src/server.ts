@@ -2,7 +2,7 @@ import process from "node:process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { CallToolRequestSchema, ListToolsRequestSchema, LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
-import { callTool, listTools, toolError } from "./tools.js";
+import { callTool, hasPrototypeKey, listTools, toolError } from "./tools.js";
 
 type Obj = Record<string, unknown>;
 type Id = string | number | null;
@@ -54,6 +54,8 @@ function message(x: unknown): void {
     const request = CallToolRequestSchema.safeParse(x);
     if (!request.success) return fail(requestId, -32602, "Invalid params");
     const respond = (result: unknown) => { if (!closing) send({ jsonrpc: "2.0", id: requestId, result }); };
+    // Schema parsing turns an own "__proto__" key into a prototype; reject it on the raw message.
+    if (hasPrototypeKey((x as { params?: { arguments?: unknown } }).params?.arguments)) return respond(toolError("Invalid tool arguments."));
     const task = callTool(request.data.params.name, request.data.params.arguments ?? {})
       .then(respond, () => respond(toolError("Tool execution failed.")));
     active.add(task);

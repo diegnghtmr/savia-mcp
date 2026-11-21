@@ -9,6 +9,8 @@ const paths = [".gitignore", ".mise.toml", ".npmrc", "package.json", "pnpm-lock.
 const forbiddenNetwork = /["'](?:node:)?(?:net|https?|tls|dgram)["']|\b(?:fetch|WebSocket)\b/i;
 const escapes = /from\s+["'](?:\.\.\/){2,}/;
 for (const name of paths) if (!fs.existsSync(path.join(root, name))) throw Error(`missing:${name}`);
+const authoredLines = paths.filter(x => x !== "pnpm-lock.yaml" && x !== "src/generated/tools.json")
+  .reduce((n, f) => n + fs.readFileSync(path.join(root, f), "utf8").split("\n").length - 1, 0);
 for (const name of [...sources, "scripts/generate-tools.mjs", "test/protocol.test.mjs", "test/tools.test.mjs"]
   .filter(x => /\.[mt]?[jt]s$/.test(x))) {
   let source = fs.readFileSync(path.join(root, name), "utf8");
@@ -30,4 +32,4 @@ if (process.argv[2]) {
     !/(?:node:http|hono)/i.test(fs.readFileSync(path.join(root, "src/server.ts"), "utf8"));
   if (!allowed || report.metadata.vulnerabilities.high || report.metadata.vulnerabilities.critical) throw Error("audit-not-allowlisted");
 }
-console.log(JSON.stringify({ paths, audit: process.argv[2] ? "allowlisted" : "static-clean" }));
+console.log(JSON.stringify({ paths, authoredLines, audit: process.argv[2] ? "allowlisted" : "static-clean" }));
