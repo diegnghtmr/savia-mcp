@@ -440,3 +440,15 @@ test("S12/U5: do not report a non-pending proposal response as a success", async
   assert.deepEqual(requests.map(r => [r.method, r.url]), [["POST", "/v1/mcp/proposals"]]);
   assert.equal(actual.isError, true, JSON.stringify(actual));
 });
+
+// Reviewer regression (verify mwtpt1qm). Append to test/tools.test.mjs.
+test("S12/U5: proposal expiration requires RFC 3339 seconds", async t => {
+  const { call } = await fixture(t, (_req, res) =>
+    res.writeHead(201).end(JSON.stringify({
+      id, preview: { marker: "must not echo" },
+      expiresAt: "2027-02-01T00:00Z", status: "pending",
+    })));
+  assert.deepEqual(await call("create_account", {
+    idempotencyKey: key, body: { name: "Envelope", type: "cash", currency: "USD" },
+  }), error("Savia API returned an invalid proposal approval."));
+});

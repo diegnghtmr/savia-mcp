@@ -94,7 +94,9 @@ export function hasPrototypeKey(value: unknown): boolean {
 const problem = z.object({ code: z.string().optional(), title: z.string().optional(), detail: z.string().optional() });
 // The OpenAPI McpProposalApproval envelope is closed; only preview permits arbitrary fields.
 const proposalApproval = z.strictObject({ id: z.uuid(), preview: z.looseObject({}),
-  expiresAt: z.iso.datetime({ offset: true }), status: z.literal("pending") });
+  // Zod's ISO datetime also accepts minute precision; RFC 3339 requires seconds.
+  expiresAt: z.iso.datetime({ offset: true }).refine(value => /T\d{2}:\d{2}:\d{2}/u.test(value)),
+  status: z.literal("pending") });
 const invalidApproval = "Savia API returned an invalid proposal approval.";
 export async function callTool(name: string, args: Args) {
   const entry = catalog.get(name);
