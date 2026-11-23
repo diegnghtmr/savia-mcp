@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import pinned from "./generated/tools.json" with { type: "json" };
+import { parseHttpUrl, responseText } from "./http-policy.js";
 
 type Schema = Exclude<Parameters<typeof z.fromJSONSchema>[0], boolean>;
 type Parameter = { in: string; name: string; required?: boolean; schema: Schema; description?: string };
@@ -58,32 +59,6 @@ const catalog = new Map((pinned as Tool[]).map(tool => {
 }));
 export const listTools = Array.from(catalog.values(), entry => entry.advertised);
 
-function apiUrl(): URL | null {
-  const url = URL.parse(process.env.SAVIA_API_URL ?? "");
-  if (!url || url.username || url.password || url.search || url.hash) return null;
-  const host = url.hostname;
-  const loopback = host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/u.test(host);
-  return url.protocol === "https:" || (url.protocol === "http:" && loopback) ? url : null;
-}
-
-const MAX_BYTES = 1_048_576;
-async function responseText(response: Response): Promise<string | null> {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      length += next.value.length;
-      if (length > MAX_BYTES) { await reader.cancel(); return null; }
-      chunks.push(next.value);
-    }
-    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, length));
-  } finally { reader.releaseLock(); }
-}
-
 // Own "__proto__" keys survive JSON.parse but are invisible to object-shape validation.
 export function hasPrototypeKey(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(hasPrototypeKey);
@@ -98,13 +73,15 @@ const proposalApproval = z.strictObject({ id: z.uuid(), preview: z.looseObject({
   expiresAt: z.iso.datetime({ offset: true }).refine(value => /T\d{2}:\d{2}:\d{2}/u.test(value)),
   status: z.literal("pending") });
 const invalidApproval = "Savia API returned an invalid proposal approval.";
-export async function callTool(name: string, args: Args) {
+type RemoteContext = { token: string; upstream: URL; workspace: string | undefined };
+export async function callTool(name: string, args: Args, context?: RemoteContext) {
   const entry = catalog.get(name);
   if (!entry) return toolError("Unknown tool.");
   const proposal = entry.tool.requiresApproval;
   if (!proposal && entry.tool.riskClass !== "read") return toolError("Tool execution is unavailable.");
   if (hasPrototypeKey(args) || !entry.parse.safeParse(args).success) return toolError("Invalid tool arguments.");
-  const url = apiUrl(), token = process.env.SAVIA_MCP_TOKEN;
+  const url = context ? new URL(context.upstream) : parseHttpUrl(process.env.SAVIA_API_URL);
+  const token = context ? context.token : process.env.SAVIA_MCP_TOKEN;
   if (!url || !token || !/^[A-Za-z0-9._~+\/-]+=*$/u.test(token)) return toolError("Savia API configuration is invalid.");
   const headers = new Headers({ Authorization: `Bearer ${token}`, Accept: "application/json, application/problem+json" });
   let path = entry.tool.path;
@@ -113,7 +90,7 @@ export async function callTool(name: string, args: Args) {
     if (!argument) continue;
     const value = args[argument];
     if (param.name === "X-Workspace-Id" && param.in === "header") {
-      const workspace = validator(param.schema).safeParse(value ?? process.env.SAVIA_WORKSPACE_ID);
+      const workspace = validator(param.schema).safeParse(value ?? (context ? context.workspace : process.env.SAVIA_WORKSPACE_ID));
       if (!workspace.success) return toolError("A valid workspaceId is required.");
       headers.set(param.name, String(workspace.data));
     } else if (param.name === "Idempotency-Key" && param.in === "header") {
@@ -138,6 +115,10 @@ export async function callTool(name: string, args: Args) {
   const redact = (text: string) => text.replaceAll(token, "[redacted]");
   try {
     const response = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), signal, redirect: "manual" });
+    if (context && (response.status === 401 || response.status === 403)) {
+      await response.body?.cancel();
+      return toolError(`Savia API ${response.status}.`);
+    }
     const isProblem = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === "application/problem+json";
     if (response.status >= 300 && response.status < 400 || !response.ok && !isProblem) {
       await response.body?.cancel();

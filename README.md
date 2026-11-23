@@ -10,12 +10,14 @@ Review and confirm in Savia web or mobile. The backend may reject proposals for
 annotated tools it does not yet implement (including `scan_receipt`,
 `update_sinking_fund`, and `withdraw_from_fund` in the U4 backend).
 
+## Local stdio
+
 Build with `pnpm build` and start with `node dist/server.js`. Calls use:
 
 - `SAVIA_API_URL`: HTTPS base URL; HTTP is allowed only for loopback hosts.
 - `SAVIA_MCP_TOKEN`: bearer credential from the environment, never a tool argument.
   Proposals require a grant-bound OAuth credential accepted by the Savia API.
-  This stdio server does not obtain tokens or implement remote transport.
+  The stdio process does not obtain tokens.
 - `SAVIA_WORKSPACE_ID`: default workspace UUID. A tool's `workspaceId` takes precedence.
 
 Tool arguments expose path and query parameters at the top level and JSON
@@ -29,9 +31,42 @@ U4 budget and transaction mutation proposals need it even though their direct
 OpenAPI operations mark it optional. Requests do not follow redirects and have
 a 2-second deadline and a 1 MiB response limit.
 
+## Remote Streamable HTTP
+
+After `pnpm build`, run `node dist/remote.js`. It listens on `127.0.0.1` (port
+`SAVIA_MCP_PORT`, default `3000`). In a non-loopback setup use a TLS reverse
+proxy that preserves `Host`, routes the MCP path and its path-specific
+`/.well-known/oauth-protected-resource` endpoint here, and routes Savia API
+requests to the backend **on the same public origin and OAuth resource**.
+
+- `SAVIA_MCP_PROPOSAL_AUDIENCE`: exact canonical MCP URL (for example
+  `https://savia.example/mcp`), also used as the metadata `resource` and token
+  audience. Clients request it as their OAuth resource.
+- `JWT_ISSUER`: trusted authorization server URL (Supabase Auth uses an
+  `/auth/v1` suffix). The server validates ES256 or RS256 bearer JWTs against
+  `<issuer>/.well-known/jwks.json`; key sets are cached for up to 60 seconds.
+- `SAVIA_API_URL`: the bare origin serving that resource's Savia `/v1` routes,
+  such as `https://savia.example`. A different origin or base path is rejected at
+  startup. Use HTTPS except with loopback fakes. Remote requests never use
+  `SAVIA_MCP_TOKEN` as a fallback.
+- `SAVIA_WORKSPACE_ID`: optional default workspace UUID, as in stdio.
+
+The endpoint uses stateless Streamable HTTP with JSON POST responses and no
+standalone SSE stream or session deletion. Requests without an acceptable
+bearer receive `401` and a `WWW-Authenticate` challenge linking to metadata.
+Tokens must have the expected issuer and sole audience, a valid expiry, and
+signed UUID `sub` and `mcp_grant_id` claims. The bearer is forwarded only to
+Savia and is never logged. The backend still checks live grant ownership,
+revocation, and tool access. Current backend reads may return `401` or `403`
+until read routes accept these tokens with live grant checks; remote tool
+errors show the status without forwarding the backend response body. This
+unit uses local issuer/JWKS and API fakes; real Supabase OAuth compatibility
+has not been verified.
+
+## Verification and regeneration
+
 Run `pnpm build`, `pnpm test` and `pnpm run audit:static`. The tool-call tests
-use a loopback fake API. From this repository, regenerate the pinned manifest
-with:
+use loopback fakes. From this repository, regenerate the pinned manifest with:
 
 ```sh
 pnpm tools:generate --authority ../../odd/authority/savia-openapi-8f1ce12.yaml

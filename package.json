@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test test/tools.test.mjs && node test/protocol.test.mjs",
+    "test": "node --test test/tools.test.mjs test/remote.test.mjs && node test/protocol.test.mjs",
     "tools:generate": "node scripts/generate-tools.mjs",
     "audit:static": "node scripts/audit.mjs"
   },
