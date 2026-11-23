@@ -92,6 +92,10 @@ export function hasPrototypeKey(value: unknown): boolean {
 }
 
 const problem = z.object({ code: z.string().optional(), title: z.string().optional(), detail: z.string().optional() });
+// The OpenAPI McpProposalApproval envelope is closed; only preview permits arbitrary fields.
+const proposalApproval = z.strictObject({ id: z.uuid(), preview: z.looseObject({}),
+  expiresAt: z.iso.datetime({ offset: true }), status: z.literal("pending") });
+const invalidApproval = "Savia API returned an invalid proposal approval.";
 export async function callTool(name: string, args: Args) {
   const entry = catalog.get(name);
   if (!entry) return toolError("Unknown tool.");
@@ -140,8 +144,14 @@ export async function callTool(name: string, args: Args) {
     const text = await responseText(response);
     if (text === null) return toolError("Savia API response is too large.");
     let data: unknown;
-    try { data = JSON.parse(text); } catch { return toolError("Savia API returned invalid JSON."); }
-    if (response.ok) return result(redact(JSON.stringify(data)));
+    try { data = JSON.parse(text); }
+    catch { return toolError(proposal && response.ok ? invalidApproval : "Savia API returned invalid JSON."); }
+    if (response.ok) {
+      // An own __proto__ key can bypass Zod's unknown-key check, but the envelope forbids it.
+      if (proposal && (!proposalApproval.safeParse(data).success || Object.hasOwn(data as object, "__proto__")))
+        return toolError(invalidApproval);
+      return result(redact(JSON.stringify(data)));
+    }
     const parsed = problem.safeParse(data);
     const { code, title, detail } = parsed.success ? parsed.data : {};
     return toolError(redact(`Savia API ${response.status}${code ? ` [${code}]` : ""}${title ? `: ${title}` : ""}${detail ? ` — ${detail}` : ""}`));

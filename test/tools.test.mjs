@@ -348,3 +348,95 @@ test("manifest check rejects a YAML-only tool annotation change", {
     });
   }
 });
+
+test("gated success responses must match the approval schema and invalid bodies are not echoed", async t => {
+  const valid = { id, preview: { details: { label: "untrusted-response-marker" } }, expiresAt: "2027-02-01T00:00:00+01:00", status: "pending" };
+  const invalid = [
+    ...Object.keys(valid).map(field => [`missing ${field}`, JSON.stringify({ ...valid, [field]: undefined })]),
+    ["invalid UUID", JSON.stringify({ ...valid, id: "not-a-uuid" })],
+    ["non-object preview", JSON.stringify({ ...valid, preview: [valid.preview] })],
+    ["null preview", JSON.stringify({ ...valid, preview: null })],
+    ["invalid date-time", JSON.stringify({ ...valid, expiresAt: "2027-02-30T00:00:00Z" })],
+    ["non-pending status", JSON.stringify({ ...valid, status: "confirmed" })],
+    ["extra property", JSON.stringify({ ...valid, extra: "untrusted-response-marker" })],
+    ["own __proto__ property", JSON.stringify({ ...valid, ["__proto__"]: "untrusted-response-marker" })],
+    ["non-object response", JSON.stringify([valid])],
+    ["invalid JSON", "untrusted-response-marker"],
+  ];
+  let reply;
+  const { call, requests } = await fixture(t, (_req, res) => res.writeHead(201).end(reply));
+  const args = { idempotencyKey: key, body: { name: "Envelope", type: "cash", currency: "USD" } };
+  for (const [label, text] of invalid) {
+    reply = text;
+    assert.deepEqual(await call("create_account", args), error("Savia API returned an invalid proposal approval."), label);
+  }
+  reply = JSON.stringify(valid);
+  assert.deepEqual(await call("create_account", args), { content: [{ type: "text", text: reply }] });
+  assert.deepEqual(requests.map(r => [r.method, r.url, r.key]),
+    Array.from({ length: invalid.length + 1 }, () => ["POST", "/v1/mcp/proposals", key]));
+});
+
+// Reviewer regressions (verify mwtnbz4k). Append to generar/savia-mcp/test/tools.test.mjs.
+test("S12/U5: no gated tool follows a direct-write or confirm redirect", async t => {
+  const cases = [
+    ...proposals,
+    ["update_sinking_fund", { fundId: id, ifMatch: '"7"', body: { name: "Reserve" } }],
+    ["withdraw_from_fund", { fundId: id, body: { accountId: override, amount, reason: "Goal reached" } }],
+    ["scan_receipt", { body: { file: "synthetic fixture" } }],
+  ];
+  let status, location;
+  const { call, requests } = await fixture(t, (req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/mcp/proposals") {
+      return res.writeHead(500).end();
+    }
+    res.writeHead(status, { Location: location }).end();
+  });
+  for (const [code, target] of [
+    [307, "/v1/transactions"],
+    [308, `/v1/approvals/${id}/confirm`],
+  ]) {
+    status = code;
+    location = target;
+    for (const [name, args] of cases) {
+      assert.deepEqual(await call(name, { ...args, idempotencyKey: key }),
+        error("Savia API redirects are not allowed."), name);
+    }
+  }
+  assert.deepEqual(requests.map(r => [r.method, r.url]),
+    Array.from({ length: cases.length * 2 }, () => ["POST", "/v1/mcp/proposals"]));
+});
+
+test("S12/U5: a saved proposal can be replayed after the response is lost", async t => {
+  const pending = { id, preview: { name: "Envelope" }, expiresAt: "2027-02-01T00:00:00Z", status: "pending" };
+  const ledger = new Map();
+  let loseResponse = true;
+  const { call, requests } = await fixture(t, (req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/mcp/proposals") return res.writeHead(500).end();
+    const k = req.headers["idempotency-key"];
+    if (!ledger.has(k)) ledger.set(k, pending);
+    if (loseResponse) { loseResponse = false; return res.destroy(); }
+    res.writeHead(201).end(JSON.stringify(ledger.get(k)));
+  });
+  const args = { idempotencyKey: key, body: { name: "Envelope", type: "cash", currency: "USD" } };
+  assert.deepEqual(await call("create_account", args), error("Savia API request failed."));
+  const stored = JSON.stringify([...ledger]);
+  assert.deepEqual(await call("create_account", args),
+    { content: [{ type: "text", text: JSON.stringify(pending) }] });
+  assert.equal(JSON.stringify([...ledger]), stored);
+  assert.equal(ledger.size, 1);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.deepEqual([requests[0].method, requests[0].url, requests[0].key],
+    ["POST", "/v1/mcp/proposals", key]);
+});
+
+test("S12/U5: do not report a non-pending proposal response as a success", async t => {
+  const { call, requests } = await fixture(t, (_req, res) =>
+    res.writeHead(201).end('{"status":"confirmed"}'));
+  const actual = await call("create_account", {
+    idempotencyKey: key,
+    body: { name: "Envelope", type: "cash", currency: "USD" },
+  });
+  assert.deepEqual(requests.map(r => [r.method, r.url]), [["POST", "/v1/mcp/proposals"]]);
+  assert.equal(actual.isError, true, JSON.stringify(actual));
+});
