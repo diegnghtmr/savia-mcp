@@ -8,35 +8,39 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { load as loadYaml } from "js-yaml";
 
 const root = new URL("../", import.meta.url);
-const missing = ["get_debt_projection"];
-const approvals = ["contribute_to_fund", "create_account", "create_budget", "create_cross_currency_transfer",
-  "create_report_definition", "create_sinking_fund", "create_transaction", "create_transfer", "scan_receipt", "update_budget",
-  "update_budget_allocations", "update_transaction", "void_transaction"];
+const authorityPath = process.env.SAVIA_OPENAPI_AUTHORITY ??
+  fileURLToPath(new URL("../../odd/authority/savia-openapi-8f1ce12.yaml", root));
+const pinnedDocument = process.env.SAVIA_OPENAPI_AUTHORITY !== undefined || existsSync(authorityPath)
+  ? loadYaml(readFileSync(authorityPath, "utf8")) : null;
+const report = "PRD tools missing from OpenAPI: none\n";
 const workspace = "59fd5039-58ea-492a-8404-b02b50671c3a", override = "fac2d19d-4273-4941-a7a2-c0eaebd321e6";
 const id = "94779f05-9dd8-410e-a478-a7666e04d664", key = "f532b1d5-1952-4eb8-8cd1-9a150bff2a06";
 const token = "test_fake_bearer_never_in_output";
 const error = text => ({ isError: true, content: [{ type: "text", text }] });
 const success = { content: [{ type: "text", text: '{"ok":true}' }] };
+const budget = { name: "Budget", method: "cash_flow", periodStart: "2026-01-01", periodEnd: "2026-01-31" };
 
-test("pinned manifest exactly matches the OpenAPI JSON and reports all missing PRD tools", {
-  skip: !process.env.SAVIA_OPENAPI_PATH && !existsSync(new URL("../../docs/", root)) && "standalone checkout has no Savia authorities",
+test("pinned manifest exactly matches the selected OpenAPI YAML without a JSON twin", {
+  skip: !pinnedDocument && "standalone checkout has no pinned Savia authority",
 }, t => {
-  const check = (...args) => {
-    const r = spawnSync(process.execPath, ["scripts/generate-tools.mjs", "--check", ...args], { cwd: root, encoding: "utf8" });
+  const check = path => {
+    const r = spawnSync(process.execPath, ["scripts/generate-tools.mjs", "--check", "--authority", path], { cwd: root, encoding: "utf8" });
     return [r.status, r.stdout, r.stderr];
   };
-  const report = `PRD tools missing from OpenAPI: ${missing.join(", ")}\n`;
-  assert.deepEqual(check(), [0, report, ""]);
+  assert.deepEqual(check(authorityPath), [0, report, ""]);
   const dir = mkdtempSync(join(tmpdir(), "savia-mcp-authority-"));
   t.after(() => rmSync(dir, { recursive: true }));
-  const authority = JSON.parse(readFileSync(process.env.SAVIA_OPENAPI_PATH ?? new URL("../../docs/savia-openapi.json", root), "utf8"));
-  authority.paths["/v1/accounts"].get.summary += " (drift probe)";
-  const alternate = join(dir, "savia-openapi.json");
-  writeFileSync(alternate, JSON.stringify(authority));
-  assert.deepEqual(check("--openapi", alternate), [1, report, "Pinned MCP manifest has drifted; run pnpm tools:generate.\n"]);
-  assert.deepEqual(check(), [0, report, ""]);
+  const alternate = join(dir, "savia-openapi.yaml");
+  const edited = structuredClone(pinnedDocument);
+  edited.paths["/v1/accounts"].get.summary += " (drift probe)";
+  writeFileSync(alternate, JSON.stringify(edited)); // JSON is also valid YAML.
+  assert.deepEqual(check(alternate), [1, report, "Pinned MCP manifest has drifted; run pnpm tools:generate.\n"]);
+  const absent = join(dir, "absent.yaml");
+  assert.deepEqual(check(absent), [1, "", `OpenAPI YAML file not found: ${absent}\n`]);
+  assert.deepEqual(check(authorityPath), [0, report, ""]);
 });
 
 async function fixture(t, handle = (_req, res) => res.end('{"ok":true}'), settings = {}) {
@@ -45,7 +49,7 @@ async function fixture(t, handle = (_req, res) => res.end('{"ok":true}'), settin
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     requests.push({ method: req.method, url: req.url, authorization: req.headers.authorization,
-      workspace: req.headers["x-workspace-id"], key: req.headers["idempotency-key"],
+      workspace: req.headers["x-workspace-id"], key: req.headers["idempotency-key"], ifMatch: req.headers["if-match"],
       contentType: req.headers["content-type"], accept: req.headers.accept, body: Buffer.concat(chunks).toString() });
     res.setHeader("Content-Type", "application/json"); handle(req, res);
   });
@@ -70,6 +74,9 @@ const reads = [
     "GET", `/v1/accounts/${id}/balance?asOf=2026-11-20T12%3A00%3A00%2B01%3A00`],
   ["search_transactions", { query: "a&b + c", limit: 200 }, "GET", "/v1/transactions?limit=200&query=a%26b+%2B+c"],
   ["get_budget_status", { budgetId: id }, "GET", `/v1/budgets/${id}`],
+  ["get_sinking_fund", { fundId: id }, "GET", `/v1/funds/${id}`],
+  ["get_debt_projection", { debtId: id, strategy: "custom_extra", extraMonthlyPaymentMinor: "5000" },
+    "GET", `/v1/debts/${id}/projection?strategy=custom_extra&extraMonthlyPaymentMinor=5000`],
   ["get_financial_summary", { from: "2026-01-01", to: "2026-01-31", presentationCurrency: "COP" },
     "GET", "/v1/analytics/summary?from=2026-01-01&to=2026-01-31&presentationCurrency=COP"],
   ["create_forecast", { body: { horizonDays: 730, accountIds: [id] }, idempotencyKey: key }, "POST", "/v1/forecasts/balance"],
@@ -82,34 +89,63 @@ const reads = [
   ["export_report_pdf", { reportRunId: id }, "GET", `/v1/report-runs/${id}`],
 ];
 
-test("advertises the 25 annotated tools and sends the exact request for each read", async t => {
+test("advertised names, scopes, risks and required headers match the pinned authority", {
+  skip: !pinnedDocument && "standalone checkout has no pinned Savia authority",
+}, async t => {
+  const { client, requests } = await fixture(t);
+  const { tools } = await client.listTools();
+  const expected = new Map();
+  for (const item of Object.values(pinnedDocument.paths)) for (const operation of Object.values(item)) {
+    const annotation = operation?.["x-savia-mcp-tool"];
+    if (!annotation) continue;
+    const parameters = new Map();
+    for (const raw of [...item.parameters ?? [], ...operation.parameters ?? []]) {
+      const parameter = raw.$ref ? pinnedDocument.components.parameters[raw.$ref.split("/").at(-1)] : raw;
+      if (parameter.in === "header") parameters.set(parameter.name, parameter.required ?? false);
+    }
+    expected.set(annotation.name, { annotation, parameters });
+  }
+  assert.deepEqual(tools.map(tool => tool.name).sort(), [...expected.keys()].sort());
+  for (const { name, inputSchema, _meta } of tools) {
+    const { annotation, parameters } = expected.get(name);
+    assert.deepEqual(_meta, { "savia.app/riskClass": annotation.riskClass, "savia.app/requiresApproval": annotation.requiresApproval,
+      "savia.app/requiredScopes": annotation.requiredScopes }, name);
+    for (const [header, required] of parameters) {
+      const arg = { "X-Workspace-Id": "workspaceId", "Idempotency-Key": "idempotencyKey", "If-Match": "ifMatch" }[header];
+      assert.equal(inputSchema.properties[arg].type, "string", `${name}: ${header}`);
+      assert.equal(inputSchema.required.includes(arg), required, `${name}: ${header}`);
+    }
+  }
+  assert.deepEqual(requests, []);
+});
+
+test("sends the exact HTTP request for each read and preserves read-command defaults", async t => {
   const { client, call, requests } = await fixture(t);
   assert.deepEqual(client.getServerCapabilities(), { tools: {} });
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), [...reads.map(([name]) => name), ...approvals].sort());
   const balance = tools.find(tool => tool.name === "get_account_balance");
   assert.equal(balance.description, "Get account balance");
-  assert.deepEqual(balance.inputSchema.required, ["accountId"]);
+  assert.deepEqual(balance.inputSchema.required.slice().sort(), ["accountId", "workspaceId"]);
   assert.deepEqual(balance.inputSchema.properties.accountId, { type: "string", format: "uuid" });
   assert.deepEqual(balance._meta, { "savia.app/riskClass": "read", "savia.app/requiresApproval": false,
     "savia.app/requiredScopes": ["accounts:read"] });
+  assert.deepEqual(tools.find(tool => tool.name === "get_debt_projection")._meta,
+    { "savia.app/riskClass": "read", "savia.app/requiresApproval": false, "savia.app/requiredScopes": ["budgets:read"] });
   for (const [name, args, method, url] of reads) {
     assert.deepEqual(await call(name, args), success, name);
     const request = requests.at(-1);
     assert.deepEqual(request, { method, url, authorization: `Bearer ${token}`,
       workspace: name === "list_workspaces" ? undefined : args.workspaceId ?? workspace,
-      key: name === "run_scenario" ? request.key : args.idempotencyKey, contentType: args.body ? "application/json" : undefined,
+      key: name === "run_scenario" ? request.key : args.idempotencyKey, ifMatch: undefined, contentType: args.body ? "application/json" : undefined,
       accept: "application/json, application/problem+json", body: args.body ? JSON.stringify(args.body) : "" }, name);
     if (name === "run_scenario") assert.match(request.key, /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/u);
   }
-  assert.equal(requests.length, 12);
+  assert.equal(requests.length, reads.length);
 });
 
-test("approval, unknown tools, and invalid arguments never reach the API", async t => {
+test("unknown tools and invalid arguments never reach the API", async t => {
   const { call, requests } = await fixture(t);
-  for (const name of approvals) assert.deepEqual(await call(name, { extra: token }),
-    error("requires approval — not available in this version"), name);
-  for (const name of missing) assert.deepEqual(await call(name), error("Unknown tool."));
+  for (const name of ["not_a_tool", "confirm_approval"]) assert.deepEqual(await call(name), error("Unknown tool."));
   for (const [name, args] of [
     ["get_account_balance", {}], ["get_account_balance", { accountId: "../other" }],
     ["list_accounts", { limit: 0 }], ["list_accounts", { limit: 201 }], ["list_accounts", { limit: "1" }],
@@ -118,6 +154,10 @@ test("approval, unknown tools, and invalid arguments never reach the API", async
     ["get_financial_summary", { from: "2026-02-30", to: "2026-03-01" }],
     ["create_forecast", {}], ["create_forecast", { body: { accountIds: [id, id] } }],
     ["run_report", { body: { format: "json" } }], ["run_report", { body: { preset: "expenses", definitionId: id, format: "json" } }],
+    ["run_scenario", { scenarioId: id, idempotencyKey: "not-a-uuid" }],
+    ["create_budget", { body: budget, idempotencyKey: "bad" }],
+    ["update_sinking_fund", { fundId: id, body: { name: "Fund" } }],
+    ["update_sinking_fund", { fundId: id, ifMatch: 7, body: { name: "Fund" } }],
   ]) assert.deepEqual(await call(name, args), error("Invalid tool arguments."), name);
   assert.deepEqual(requests, []);
 });
@@ -156,15 +196,61 @@ test("maps problems, redacts backend echoes, and bounds redirects, size and time
   assert.deepEqual(requests.map(r => r.url), ["problem", "echo", "redirect", "large", "slow", "invalid"].map(v => `/v1/accounts?cursor=${v}`));
 });
 
-test("approval-only tools advertise their optional If-Match parameter", async t => {
-  const { client, requests } = await fixture(t);
-  const { tools } = await client.listTools();
-  for (const name of ["update_budget", "update_budget_allocations", "update_transaction", "void_transaction"]) {
-    const { inputSchema } = tools.find(tool => tool.name === name);
-    assert.equal(inputSchema.properties.ifMatch?.type, "string", name);
-    assert.ok(!inputSchema.required.includes("ifMatch"), name);
+const occurredAt = "2026-01-02T00:00:00Z";
+const amount = { amountMinor: "25", currency: "USD" };
+const proposals = [
+  ["create_account", { body: { name: "Cash", type: "cash", currency: "USD" } }],
+  ["create_transaction", { body: { accountId: id, type: "expense", amount, occurredAt } }],
+  ["update_transaction", { transactionId: id, ifMatch: '"7"', body: { notes: "Updated" } }],
+  ["void_transaction", { transactionId: id, ifMatch: '"7"', body: { reason: "Duplicate" } }],
+  ["create_transfer", { body: { sourceAccountId: id, destinationAccountId: override, amount, occurredAt } }],
+  ["create_cross_currency_transfer", { body: { sourceAccountId: id, destinationAccountId: override, sourceAmount: amount,
+    destinationAmount: { ...amount, currency: "EUR" }, executedRate: "1", occurredAt } }],
+  ["create_budget", { body: budget }],
+  ["update_budget", { budgetId: id, ifMatch: '"7"', body: { name: "Updated" } }],
+  ["update_budget_allocations", { budgetId: id, ifMatch: '"7"', body: { allocations: [] } }],
+  ["create_sinking_fund", { body: { name: "Fund", currency: "USD", targetAmount: amount } }],
+  ["contribute_to_fund", { fundId: id, body: { accountId: override, amount, occurredAt } }],
+  ["create_report_definition", { body: { name: "Report", dimensions: ["category"], measures: ["sum"], visualization: "table" } }],
+];
+
+test("writes return pending proposals unchanged and never call a direct write or confirm", async t => {
+  const pending = { id, preview: { action: "preview from API" }, expiresAt: occurredAt, status: "pending" };
+  const { call, requests } = await fixture(t, (_req, res) => { res.writeHead(201); res.end(JSON.stringify(pending)); });
+  for (const [name, args] of proposals) {
+    const proposed = { content: [{ type: "text", text: JSON.stringify(pending) }] };
+    assert.deepEqual(await call(name, { ...args, workspaceId: override, idempotencyKey: key }), proposed, name);
+    const toolArgs = Object.keys(args).length === 1 ? args.body : args;
+    assert.deepEqual(requests.at(-1), { method: "POST", url: "/v1/mcp/proposals", authorization: `Bearer ${token}`,
+      workspace: override, key, ifMatch: undefined, contentType: "application/json", accept: "application/json, application/problem+json",
+      body: JSON.stringify({ toolName: name, arguments: toolArgs }) }, name);
   }
-  assert.deepEqual(requests, []);
+  assert.equal(requests.length, proposals.length);
+});
+
+test("proposal callers can supply a replay key or receive a fresh default; backend rejections do not retry", async t => {
+  const { call, requests } = await fixture(t, (_req, res) => {
+    res.writeHead(422, { "Content-Type": "application/problem+json" });
+    res.end('{"title":"Invalid MCP proposal tool or arguments"}');
+  });
+  const rejected = error("Savia API 422: Invalid MCP proposal tool or arguments");
+  const fundEdit = { fundId: id, ifMatch: '"7"', body: { name: "New name" } };
+  const receipt = { file: "synthetic fixture" };
+  const calls = [
+    ["update_sinking_fund", fundEdit, fundEdit, key], ["update_sinking_fund", fundEdit, fundEdit, key],
+    ["scan_receipt", { body: receipt }, receipt], ["scan_receipt", { body: receipt }, receipt],
+    ["withdraw_from_fund", { fundId: id, body: { accountId: override, amount, reason: "Goal reached" } }, null, key],
+  ];
+  for (const [index, [name, args, toolArgs, suppliedKey]] of calls.entries()) {
+    assert.deepEqual(await call(name, suppliedKey ? { ...args, idempotencyKey: suppliedKey } : args), rejected, name);
+    const sentKey = requests[index].key;
+    if (!suppliedKey) assert.match(sentKey, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u);
+    assert.deepEqual(requests[index], { method: "POST", url: "/v1/mcp/proposals", authorization: `Bearer ${token}`,
+      workspace, key: suppliedKey ?? sentKey, ifMatch: undefined, contentType: "application/json", accept: "application/json, application/problem+json",
+      body: JSON.stringify({ toolName: name, arguments: toolArgs ?? args }) }, name);
+  }
+  assert.notEqual(requests[2].key, requests[3].key);
+  assert.equal(requests.length, calls.length);
 });
 
 test("undeclared own properties are rejected before any HTTP request", async t => {
@@ -186,7 +272,7 @@ test("search query length follows the OpenAPI Unicode character limit", async t 
 });
 
 test("manifest check rejects a YAML-only tool annotation change", {
-  skip: !existsSync(new URL("../../docs/savia-openapi.yaml", root)),
+  skip: !pinnedDocument || !existsSync(new URL("../../docs/PRD - Savia.md", root)),
 }, async t => {
   const dir = mkdtempSync(join(tmpdir(), "savia-mcp-yaml-drift-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -198,6 +284,7 @@ test("manifest check rejects a YAML-only tool annotation change", {
   const original = readFileSync(new URL("src/generated/tools.json", root));
   writeFileSync(pinned, original);
   const env = { ...process.env };
+  delete env.SAVIA_OPENAPI_AUTHORITY;
   delete env.SAVIA_OPENAPI_PATH;
   delete env.SAVIA_OPENAPI_YAML_PATH;
   delete env.SAVIA_PRD_PATH;
@@ -207,18 +294,16 @@ test("manifest check rejects a YAML-only tool annotation change", {
     assert.deepEqual(readFileSync(pinned), original);
     return [result.status, result.stdout, result.stderr];
   };
-  const report = "PRD tools missing from OpenAPI: get_debt_projection\n";
   await t.test("skips absent default authorities in a standalone checkout", () => {
     assert.deepEqual(check(), [0, "", ""]);
   });
   const docs = join(dir, "docs");
   mkdirSync(docs);
-  for (const file of ["savia-openapi.json", "PRD - Savia.md"]) {
-    cpSync(new URL(`../../docs/${file}`, root), join(docs, file));
-  }
+  cpSync(new URL("../../docs/PRD - Savia.md", root), join(docs, "PRD - Savia.md"));
+  writeFileSync(join(docs, "savia-openapi.json"), JSON.stringify(pinnedDocument));
   assert.deepEqual(check(), [0, report, ""], "a missing default YAML still allows checking the JSON manifest");
   const authority = join(docs, "savia-openapi.yaml");
-  cpSync(new URL("../../docs/savia-openapi.yaml", root), authority);
+  cpSync(authorityPath, authority);
   assert.deepEqual(check(), [0, report, ""]);
 
   const yaml = readFileSync(authority, "utf8");

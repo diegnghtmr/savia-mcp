@@ -17,7 +17,7 @@ for (const name of [...sources, "scripts/generate-tools.mjs", "test/protocol.tes
   if (escapes.test(source)) throw Error(`escapes-child:${name}`);
   // The runtime has one HTTP client; the tests bind a fake API to loopback.
   if (name === "src/tools.ts") source = source.replace(
-    'await fetch(url, { method: entry.tool.method, headers, ...(body === undefined ? {} : { body }), signal, redirect: "manual" });', "");
+    'await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), signal, redirect: "manual" });', "");
   if (name === "test/tools.test.mjs") source = source.replace('import { createServer } from "node:http";', "");
   if (forbiddenNetwork.test(source)) throw Error(`forbidden-network:${name}`);
 }

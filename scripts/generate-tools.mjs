@@ -77,31 +77,38 @@ function encode(value) {
 
 function main() {
   const { values } = parseArgs({ options: {
+    authority: { type: "string" },
     openapi: { type: "string" },
     yaml: { type: "string" },
     prd: { type: "string", default: process.env.SAVIA_PRD_PATH ?? resolve(docs, "PRD - Savia.md") },
     check: { type: "boolean" }, help: { type: "boolean", short: "h" },
   } });
   if (values.help) {
-    console.log("Usage: pnpm tools:generate [--openapi <OpenAPI JSON>] [--yaml <OpenAPI YAML>] [--prd <PRD Markdown>] [--check]\n" +
+    console.log("Usage: pnpm tools:generate [--authority <OpenAPI YAML> | [--openapi <OpenAPI JSON>] [--yaml <OpenAPI YAML>]] [--prd <PRD Markdown>] [--check]\n" +
       "Generate the pinned manifest or check it without writing. Reports PRD tools missing from OpenAPI.\n" +
+      "With --authority (or SAVIA_OPENAPI_AUTHORITY), use that YAML directly without the JSON twin.\n" +
       "Explicit OpenAPI paths must exist. With no overrides, --check skips when both default OpenAPI files are absent.");
     return;
   }
+  const authorityPath = values.authority ?? process.env.SAVIA_OPENAPI_AUTHORITY;
   const openapiOverride = values.openapi ?? process.env.SAVIA_OPENAPI_PATH;
   const yamlOverride = values.yaml ?? process.env.SAVIA_OPENAPI_YAML_PATH;
   const openapiPath = openapiOverride ?? resolve(docs, "savia-openapi.json");
   const yamlPath = yamlOverride ?? resolve(docs, "savia-openapi.yaml");
-  const hasJson = existsSync(openapiPath);
-  const hasYaml = existsSync(yamlPath);
-  if (values.check && openapiOverride === undefined && yamlOverride === undefined && !hasJson && !hasYaml) return;
-
   let document;
   try {
-    if (!hasYaml && yamlOverride !== undefined) throw Error(`OpenAPI YAML file not found: ${yamlPath}`);
-    if (!hasJson) throw Error(`OpenAPI JSON file not found: ${openapiPath}`);
-    document = JSON.parse(readFileSync(openapiPath, "utf8"));
-    if (hasYaml) assertTwinMatchesYaml(document, yamlPath);
+    if (authorityPath !== undefined) {
+      if (!existsSync(authorityPath)) throw Error(`OpenAPI YAML file not found: ${authorityPath}`);
+      document = loadYaml(readFileSync(authorityPath, "utf8"));
+    } else {
+      const hasJson = existsSync(openapiPath);
+      const hasYaml = existsSync(yamlPath);
+      if (values.check && openapiOverride === undefined && yamlOverride === undefined && !hasJson && !hasYaml) return;
+      if (!hasYaml && yamlOverride !== undefined) throw Error(`OpenAPI YAML file not found: ${yamlPath}`);
+      if (!hasJson) throw Error(`OpenAPI JSON file not found: ${openapiPath}`);
+      document = JSON.parse(readFileSync(openapiPath, "utf8"));
+      if (hasYaml) assertTwinMatchesYaml(document, yamlPath);
+    }
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
