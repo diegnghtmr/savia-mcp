@@ -10,26 +10,26 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { load as loadYaml } from "js-yaml";
+import { id, key, override, reads } from "./read-tools.mjs";
 
 const root = new URL("../", import.meta.url);
 const authorityPath = process.env.SAVIA_OPENAPI_AUTHORITY ??
-  fileURLToPath(new URL("../../odd/authority/savia-openapi-8f1ce12.yaml", root));
+  fileURLToPath(new URL("../../odd/authority/savia-openapi-9785033.yaml", root));
 const pinnedDocument = process.env.SAVIA_OPENAPI_AUTHORITY !== undefined || existsSync(authorityPath)
   ? loadYaml(readFileSync(authorityPath, "utf8")) : null;
 const report = "PRD tools missing from OpenAPI: none\n";
-const workspace = "59fd5039-58ea-492a-8404-b02b50671c3a", override = "fac2d19d-4273-4941-a7a2-c0eaebd321e6";
-const id = "94779f05-9dd8-410e-a478-a7666e04d664", key = "f532b1d5-1952-4eb8-8cd1-9a150bff2a06";
+const workspace = "59fd5039-58ea-492a-8404-b02b50671c3a";
 const token = "test_fake_bearer_never_in_output";
 const error = text => ({ isError: true, content: [{ type: "text", text }] });
 const success = { content: [{ type: "text", text: '{"ok":true}' }] };
 const budget = { name: "Budget", method: "cash_flow", periodStart: "2026-01-01", periodEnd: "2026-01-31" };
 
-test("pinned catalog excludes scan_receipt without changing other tools", () => {
+test("pinned catalog excludes scan_receipt and preserves the reviewed snapshot", () => {
   const manifest = readFileSync(new URL("src/generated/tools.json", root));
   assert.equal(JSON.parse(manifest).some(tool => tool.name === "scan_receipt"), false);
-  // The 8f1ce12 manifest with only the receipt record removed, including byte layout.
+  // The 9785033 manifest after the L19 exclusion, including byte layout.
   assert.equal(createHash("sha256").update(manifest).digest("hex"),
-    "ebbfb0192c61f1f4779d893469e388ff95ae870bcaf5dd59b0523557c33f5181");
+    "f940cbe75abd988d01e7bcdda32e1c887b5e4e779e87e6caddc9ff7ddbeb34e9");
 });
 
 test("pinned manifest exactly matches the selected OpenAPI YAML without a JSON twin", {
@@ -77,27 +77,6 @@ async function fixture(t, handle = (_req, res) => res.end('{"ok":true}'), settin
   return { client, requests, call: (name, args = {}) => client.callTool({ name, arguments: args }, undefined, { timeout: 8000 }) };
 }
 
-const reads = [
-  ["list_accounts", { limit: 1, status: "active" }, "GET", "/v1/accounts?limit=1&status=active"],
-  ["get_account_balance", { accountId: id, workspaceId: override, asOf: "2026-11-20T12:00:00+01:00" },
-    "GET", `/v1/accounts/${id}/balance?asOf=2026-11-20T12%3A00%3A00%2B01%3A00`],
-  ["search_transactions", { query: "a&b + c", limit: 200 }, "GET", "/v1/transactions?limit=200&query=a%26b+%2B+c"],
-  ["get_budget_status", { budgetId: id }, "GET", `/v1/budgets/${id}`],
-  ["get_sinking_fund", { fundId: id }, "GET", `/v1/funds/${id}`],
-  ["get_debt_projection", { debtId: id, strategy: "custom_extra", extraMonthlyPaymentMinor: "5000" },
-    "GET", `/v1/debts/${id}/projection?strategy=custom_extra&extraMonthlyPaymentMinor=5000`],
-  ["get_financial_summary", { from: "2026-01-01", to: "2026-01-31", presentationCurrency: "COP" },
-    "GET", "/v1/analytics/summary?from=2026-01-01&to=2026-01-31&presentationCurrency=COP"],
-  ["create_forecast", { body: { horizonDays: 730, accountIds: [id] }, idempotencyKey: key }, "POST", "/v1/forecasts/balance"],
-  ["run_scenario", { scenarioId: id }, "POST", `/v1/scenarios/${id}/runs`],
-  ["run_report", { body: { preset: "monthly_summary", format: "json", filters: { accountId: id } }, idempotencyKey: key },
-    "POST", "/v1/report-runs"],
-  ["list_ai_providers", {}, "GET", "/v1/ai/providers"],
-  ["get_forecast", { forecastId: id }, "GET", `/v1/forecasts/${id}`],
-  ["list_workspaces", { limit: 5 }, "GET", "/v1/workspaces?limit=5"],
-  ["export_report_pdf", { reportRunId: id }, "GET", `/v1/report-runs/${id}`],
-];
-
 test("advertised names, scopes, risks and required headers match the pinned authority except deferred scan_receipt", {
   skip: !pinnedDocument && "standalone checkout has no pinned Savia authority",
 }, async t => {
@@ -107,6 +86,10 @@ test("advertised names, scopes, risks and required headers match the pinned auth
   for (const item of Object.values(pinnedDocument.paths)) for (const operation of Object.values(item)) {
     const annotation = operation?.["x-savia-mcp-tool"];
     if (!annotation || annotation.name === "scan_receipt") continue;
+    if (annotation.riskClass === "read") {
+      assert.deepEqual(operation.security?.find(requirement => Object.hasOwn(requirement, "mcpOAuth")),
+        { mcpOAuth: annotation.requiredScopes }, annotation.name);
+    }
     const parameters = new Map();
     for (const raw of [...item.parameters ?? [], ...operation.parameters ?? []]) {
       const parameter = raw.$ref ? pinnedDocument.components.parameters[raw.$ref.split("/").at(-1)] : raw;
@@ -136,11 +119,11 @@ test("sends the exact HTTP request for each read and preserves read-command defa
   assert.equal(balance.description, "Get account balance");
   assert.deepEqual(balance.inputSchema.required.slice().sort(), ["accountId", "workspaceId"]);
   assert.deepEqual(balance.inputSchema.properties.accountId, { type: "string", format: "uuid" });
-  assert.deepEqual(balance._meta, { "savia.app/riskClass": "read", "savia.app/requiresApproval": false,
-    "savia.app/requiredScopes": ["accounts:read"] });
-  assert.deepEqual(tools.find(tool => tool.name === "get_debt_projection")._meta,
-    { "savia.app/riskClass": "read", "savia.app/requiresApproval": false, "savia.app/requiredScopes": ["budgets:read"] });
-  for (const [name, args, method, url] of reads) {
+  assert.deepEqual(tools.filter(tool => tool._meta["savia.app/riskClass"] === "read").map(tool => tool.name).sort(),
+    reads.map(([name]) => name).sort());
+  for (const [name, args, method, url, scopes] of reads) {
+    assert.deepEqual(tools.find(tool => tool.name === name)._meta,
+      { "savia.app/riskClass": "read", "savia.app/requiresApproval": false, "savia.app/requiredScopes": scopes }, name);
     assert.deepEqual(await call(name, args), success, name);
     const request = requests.at(-1);
     assert.deepEqual(request, { method, url, authorization: `Bearer ${token}`,
@@ -223,6 +206,32 @@ const proposals = [
   ["contribute_to_fund", { fundId: id, body: { accountId: override, amount, occurredAt } }],
   ["create_report_definition", { body: { name: "Report", dimensions: ["category"], measures: ["sum"], visualization: "table" } }],
 ];
+
+test("update_transaction proposals set or clear manual extraordinary classification", async t => {
+  const pending = { id, preview: {}, expiresAt: occurredAt, status: "pending" };
+  const { client, call, requests } = await fixture(t, (_req, res) => res.writeHead(201).end(JSON.stringify(pending)));
+  const transaction = { transactionId: id, ifMatch: '"7"', idempotencyKey: key };
+  for (const extraordinary of ["false", null]) {
+    assert.deepEqual(await call("update_transaction", { ...transaction, body: { extraordinary } }),
+      error("Invalid tool arguments."));
+  }
+  assert.deepEqual(requests, []);
+  for (const extraordinary of [true, false]) {
+    const body = { extraordinary };
+    assert.deepEqual(await call("update_transaction", { ...transaction, body }),
+      { content: [{ type: "text", text: JSON.stringify(pending) }] });
+    assert.deepEqual(requests.at(-1), { method: "POST", url: "/v1/mcp/proposals", authorization: `Bearer ${token}`,
+      workspace, key, ifMatch: undefined, contentType: "application/json", accept: "application/json, application/problem+json",
+      body: JSON.stringify({ toolName: "update_transaction", arguments: { transactionId: id, ifMatch: '"7"', body } }) });
+  }
+  assert.equal(requests.length, 2);
+  const { tools } = await client.listTools();
+  const body = tools.find(tool => tool.name === "update_transaction").inputSchema.properties.body;
+  assert.deepEqual(body.properties.extraordinary, {
+    type: "boolean", description: "Sets or clears the manual extraordinary classification; omit to leave unchanged.",
+  });
+  assert.ok(!body.required?.includes("extraordinary"));
+});
 
 test("writes return pending proposals unchanged and never call a direct write or confirm", async t => {
   const pending = { id, preview: { action: "preview from API" }, expiresAt: occurredAt, status: "pending" };

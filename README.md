@@ -1,13 +1,15 @@
 # Savia MCP
 
 Local stdio server with 28 tools generated from the pinned Savia OpenAPI authority
-(`8f1ce12`): 14 reads, including `get_debt_projection` (`budgets:read`), and 14
-approval-gated tools. Read tools call their annotated endpoints, including three
-POST operations classified as reads. Approval-gated tools only submit `POST
-/v1/mcp/proposals`; they never call a direct write route or confirm an approval.
-The result includes the backend's pending approval ID, preview, expiry and status.
-Review and confirm in Savia web or mobile. Older backends (such as U4) may
-reject proposals for `update_sinking_fund` and `withdraw_from_fund`.
+(`9785033`): 14 reads, including `get_debt_projection` and `get_sinking_fund`
+(`budgets:read`), and 14 approval-gated tools. Both transports call the same
+annotated read endpoints, including three POST operations classified as reads.
+Approval-gated tools only submit `POST /v1/mcp/proposals`; they never call a
+direct write route or confirm an approval. The result includes the backend's
+pending approval ID, preview, expiry and status. Review and confirm in Savia web
+or mobile. The integrated backend does not yet execute proposals for
+`update_sinking_fund` or `withdraw_from_fund`; both remain advertised while
+backend support is in progress.
 
 The generator deliberately excludes `scan_receipt`, so neither local stdio nor
 remote Streamable HTTP advertises it. OpenAPI defines it as a multipart upload,
@@ -33,9 +35,11 @@ stdio calls may omit `workspaceId` when `SAVIA_WORKSPACE_ID` supplies it, and ma
 omit `idempotencyKey` to generate a fresh UUID. To safely retry the same request,
 pass and reuse your own UUID; omitting the key on a second call creates a new
 idempotency key. Where supported, pass the resource's quoted ETag as `ifMatch`.
-U4 budget and transaction mutation proposals need it even though their direct
-OpenAPI operations mark it optional. Requests do not follow redirects and have
-a 2-second deadline and a 1 MiB response limit.
+Budget and transaction mutation proposals need it even though their direct
+OpenAPI operations mark it optional. In `update_transaction`, set
+`body.extraordinary` to `true` or `false` to set or clear manual extraordinary
+classification; omit it to leave classification unchanged. Requests do not follow
+redirects and have a 2-second deadline and a 1 MiB response limit.
 
 ## Remote Streamable HTTP
 
@@ -62,11 +66,11 @@ standalone SSE stream or session deletion. Requests without an acceptable
 bearer receive `401` and a `WWW-Authenticate` challenge linking to metadata.
 Tokens must have the expected issuer and sole audience, a valid expiry, and
 signed UUID `sub` and `mcp_grant_id` claims. The bearer is forwarded only to
-Savia and is never logged. The backend still checks live grant ownership,
-revocation, and tool access. Current backend reads may return `401` or `403`
-until read routes accept these tokens with live grant checks; remote tool
-errors show the status without forwarding the backend response body. This
-unit uses local issuer/JWKS and API fakes; real Supabase OAuth compatibility
+Savia and is never logged. All 14 read routes in `9785033` accept `mcpOAuth`
+with the tool's required scopes. The integrated backend checks the live grant,
+including ownership, revocation, and tool access. If the upstream rejects a read
+or proposal with `401` or `403`, the remote tool error shows only the status.
+Tests use local issuer/JWKS and API fakes; real Supabase OAuth compatibility
 has not been verified.
 
 ## Verification and regeneration
@@ -75,7 +79,7 @@ Run `pnpm build`, `pnpm test` and `pnpm run audit:static`. The tool-call tests
 use loopback fakes. From this repository, regenerate the pinned manifest with:
 
 ```sh
-pnpm tools:generate --authority ../../odd/authority/savia-openapi-8f1ce12.yaml
+pnpm tools:generate --authority ../../odd/authority/savia-openapi-9785033.yaml
 ```
 
 Add `--check` to verify it without writing. `SAVIA_OPENAPI_AUTHORITY` also selects

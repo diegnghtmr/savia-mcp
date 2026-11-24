@@ -3,15 +3,15 @@ import path from "node:path";
 const root = path.resolve(import.meta.dirname, "..");
 const sources = fs.readdirSync(path.join(root, "src"), { recursive: true, withFileTypes: true })
   .filter(entry => entry.isFile()).map(entry => path.relative(root, path.join(entry.parentPath, entry.name))).sort();
+const tests = ["test/protocol.test.mjs", "test/tools.test.mjs", "test/remote.test.mjs", "test/read-tools.mjs"];
 const paths = [".gitignore", ".mise.toml", ".npmrc", "package.json", "pnpm-lock.yaml", "tsconfig.json",
-  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "scripts/generate-tools.mjs", ...sources,
-  "test/protocol.test.mjs", "test/tools.test.mjs", "test/remote.test.mjs"];
+  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "scripts/generate-tools.mjs", ...sources, ...tests];
 const forbiddenNetwork = /["'](?:node:)?(?:net|https?|tls|dgram)["']|\b(?:fetch|WebSocket)\b/i;
 const escapes = /from\s+["'](?:\.\.\/){2,}/;
 for (const name of paths) if (!fs.existsSync(path.join(root, name))) throw Error(`missing:${name}`);
 const authoredLines = paths.filter(x => x !== "pnpm-lock.yaml" && x !== "src/generated/tools.json")
   .reduce((n, f) => n + fs.readFileSync(path.join(root, f), "utf8").split("\n").length - 1, 0);
-for (const name of [...sources, "scripts/generate-tools.mjs", "test/protocol.test.mjs", "test/tools.test.mjs", "test/remote.test.mjs"]
+for (const name of [...sources, "scripts/generate-tools.mjs", ...tests]
   .filter(x => /\.[mt]?[jt]s$/.test(x))) {
   let source = fs.readFileSync(path.join(root, name), "utf8");
   if (escapes.test(source)) throw Error(`escapes-child:${name}`);

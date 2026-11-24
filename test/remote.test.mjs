@@ -5,6 +5,7 @@ import { createServer, request } from "node:http";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { key, reads } from "./read-tools.mjs";
 
 const grant = "59fd5039-58ea-492a-8404-b02b50671c3a";
 const subject = "94779f05-9dd8-410e-a478-a7666e04d664";
@@ -200,7 +201,6 @@ test("remote HTTP uses SDK streaming HTTP with request-local bearer and no direc
     toolError("Unknown tool."));
   assert.deepEqual(await first.callTool({ name: "list_accounts" }), { content: [{ type: "text", text: '{"ok":true,"echo":"Bearer [redacted]"}' }] });
   const body = { name: "Envelope", type: "cash", currency: "USD" };
-  const key = "f532b1d5-1952-4eb8-8cd1-9a150bff2a06";
   assert.deepEqual(await second.callTool({ name: "create_account", arguments: { body, idempotencyKey: key } }),
     { content: [{ type: "text", text: JSON.stringify(pending) }] });
   assert.deepEqual(fake.api, [
@@ -208,6 +208,21 @@ test("remote HTTP uses SDK streaming HTTP with request-local bearer and no direc
     { method: "POST", url: "/v1/mcp/proposals", bearer: `Bearer ${secondToken}`, workspace: subject, key,
       body: JSON.stringify({ toolName: "create_account", arguments: body }) },
   ]);
+  assert.deepEqual(tools.filter(tool => tool._meta["savia.app/riskClass"] === "read").map(tool => tool.name).sort(),
+    reads.map(([name]) => name).sort());
+  for (const [name, args, method, url, scopes] of reads) {
+    assert.deepEqual(tools.find(tool => tool.name === name)._meta,
+      { "savia.app/riskClass": "read", "savia.app/requiresApproval": false, "savia.app/requiredScopes": scopes }, name);
+    assert.deepEqual(await first.callTool({ name, arguments: args }),
+      { content: [{ type: "text", text: '{"ok":true,"echo":"Bearer [redacted]"}' }] }, name);
+    const request = fake.api.at(-1);
+    assert.deepEqual(request, { method, url, bearer: `Bearer ${fake.token}`,
+      workspace: name === "list_workspaces" ? undefined : args.workspaceId ?? subject,
+      key: name === "run_scenario" ? request.key : args.idempotencyKey,
+      body: args.body ? JSON.stringify(args.body) : "" }, name);
+    if (name === "run_scenario") assert.match(request.key, /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/u);
+  }
+  assert.equal(fake.api.length, 2 + reads.length);
 });
 
 test("remote HTTP suppresses upstream 401/403 bodies and refuses untrusted browser origins", async t => {
