@@ -7,6 +7,11 @@ const root = resolve(import.meta.dirname, "..");
 const docs = resolve(root, "../../docs");
 const manifest = resolve(root, "src/generated/tools.json");
 const methods = "get post put patch delete head options trace".split(" ");
+const excludedTools = new Set([
+  // Multipart uploads cannot travel through JSON proposals or roll back with approval execution.
+  // Defer until the authority defines a staged upload reference and its storage lifecycle.
+  "scan_receipt",
+]);
 
 function dereference(node, document, refs = []) {
   if (Array.isArray(node)) return node.map(item => dereference(item, document, refs));
@@ -36,10 +41,13 @@ function* toolOperations(document) {
 
 function generate(document) {
   const tools = new Map();
+  const annotatedNames = new Set();
   for (const { path, method, item, operation, annotation } of toolOperations(document)) {
     if (!annotation) continue;
     const { name, riskClass, requiresApproval, requiredScopes } = annotation;
-    if (tools.has(name)) throw Error(`Duplicate MCP tool: ${name}`);
+    if (annotatedNames.has(name)) throw Error(`Duplicate MCP tool: ${name}`);
+    annotatedNames.add(name);
+    if (excludedTools.has(name)) continue;
     const parameters = new Map();
     for (const source of [item, operation]) {
       for (const raw of source.parameters ?? []) {
@@ -52,7 +60,7 @@ function generate(document) {
       parameters: [...parameters.values()], requestSchema: request ? (request.content["application/json"] ?? Object.values(request.content)[0])?.schema ?? null : null,
       requestRequired: Boolean(request?.required), riskClass, requiresApproval, requiredScopes });
   }
-  return tools;
+  return { tools, annotatedNames };
 }
 
 function annotationsByOperation(document) {
@@ -114,11 +122,11 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  const tools = generate(document);
+  const { tools, annotatedNames } = generate(document);
   const [, section] = readFileSync(values.prd, "utf8").split("FR-MCP-001 — Herramientas", 2);
   const expected = new Set(section?.split("FR-MCP-002", 1)[0].match(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/gm));
   if (!expected.size) throw Error("FR-MCP-001 contains no tool names");
-  const missing = [...expected].filter(name => !tools.has(name)).sort();
+  const missing = [...expected].filter(name => !annotatedNames.has(name)).sort();
   console.log(`PRD tools missing from OpenAPI: ${missing.join(", ") || "none"}`);
   const pinned = Buffer.from(`[\n${[...tools.keys()].sort().map(name => `  ${encode(tools.get(name))}`).join(",\n")}\n]\n`);
   if (values.check) {

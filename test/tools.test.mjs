@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -22,6 +23,14 @@ const token = "test_fake_bearer_never_in_output";
 const error = text => ({ isError: true, content: [{ type: "text", text }] });
 const success = { content: [{ type: "text", text: '{"ok":true}' }] };
 const budget = { name: "Budget", method: "cash_flow", periodStart: "2026-01-01", periodEnd: "2026-01-31" };
+
+test("pinned catalog excludes scan_receipt without changing other tools", () => {
+  const manifest = readFileSync(new URL("src/generated/tools.json", root));
+  assert.equal(JSON.parse(manifest).some(tool => tool.name === "scan_receipt"), false);
+  // The 8f1ce12 manifest with only the receipt record removed, including byte layout.
+  assert.equal(createHash("sha256").update(manifest).digest("hex"),
+    "ebbfb0192c61f1f4779d893469e388ff95ae870bcaf5dd59b0523557c33f5181");
+});
 
 test("pinned manifest exactly matches the selected OpenAPI YAML without a JSON twin", {
   skip: !pinnedDocument && "standalone checkout has no pinned Savia authority",
@@ -89,7 +98,7 @@ const reads = [
   ["export_report_pdf", { reportRunId: id }, "GET", `/v1/report-runs/${id}`],
 ];
 
-test("advertised names, scopes, risks and required headers match the pinned authority", {
+test("advertised names, scopes, risks and required headers match the pinned authority except deferred scan_receipt", {
   skip: !pinnedDocument && "standalone checkout has no pinned Savia authority",
 }, async t => {
   const { client, requests } = await fixture(t);
@@ -97,7 +106,7 @@ test("advertised names, scopes, risks and required headers match the pinned auth
   const expected = new Map();
   for (const item of Object.values(pinnedDocument.paths)) for (const operation of Object.values(item)) {
     const annotation = operation?.["x-savia-mcp-tool"];
-    if (!annotation) continue;
+    if (!annotation || annotation.name === "scan_receipt") continue;
     const parameters = new Map();
     for (const raw of [...item.parameters ?? [], ...operation.parameters ?? []]) {
       const parameter = raw.$ref ? pinnedDocument.components.parameters[raw.$ref.split("/").at(-1)] : raw;
@@ -146,6 +155,7 @@ test("sends the exact HTTP request for each read and preserves read-command defa
 test("unknown tools and invalid arguments never reach the API", async t => {
   const { call, requests } = await fixture(t);
   for (const name of ["not_a_tool", "confirm_approval"]) assert.deepEqual(await call(name), error("Unknown tool."));
+  assert.deepEqual(await call("scan_receipt", { body: { file: "synthetic fixture" } }), error("Unknown tool."));
   for (const [name, args] of [
     ["get_account_balance", {}], ["get_account_balance", { accountId: "../other" }],
     ["list_accounts", { limit: 0 }], ["list_accounts", { limit: 201 }], ["list_accounts", { limit: "1" }],
@@ -235,19 +245,18 @@ test("proposal callers can supply a replay key or receive a fresh default; backe
   });
   const rejected = error("Savia API 422: Invalid MCP proposal tool or arguments");
   const fundEdit = { fundId: id, ifMatch: '"7"', body: { name: "New name" } };
-  const receipt = { file: "synthetic fixture" };
+  const withdrawal = { fundId: id, body: { accountId: override, amount, reason: "Goal reached" } };
   const calls = [
-    ["update_sinking_fund", fundEdit, fundEdit, key], ["update_sinking_fund", fundEdit, fundEdit, key],
-    ["scan_receipt", { body: receipt }, receipt], ["scan_receipt", { body: receipt }, receipt],
-    ["withdraw_from_fund", { fundId: id, body: { accountId: override, amount, reason: "Goal reached" } }, null, key],
+    ["update_sinking_fund", fundEdit, key], ["update_sinking_fund", fundEdit, key],
+    ["withdraw_from_fund", withdrawal], ["withdraw_from_fund", withdrawal], ["withdraw_from_fund", withdrawal, key],
   ];
-  for (const [index, [name, args, toolArgs, suppliedKey]] of calls.entries()) {
+  for (const [index, [name, args, suppliedKey]] of calls.entries()) {
     assert.deepEqual(await call(name, suppliedKey ? { ...args, idempotencyKey: suppliedKey } : args), rejected, name);
     const sentKey = requests[index].key;
     if (!suppliedKey) assert.match(sentKey, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u);
     assert.deepEqual(requests[index], { method: "POST", url: "/v1/mcp/proposals", authorization: `Bearer ${token}`,
       workspace, key: suppliedKey ?? sentKey, ifMatch: undefined, contentType: "application/json", accept: "application/json, application/problem+json",
-      body: JSON.stringify({ toolName: name, arguments: toolArgs ?? args }) }, name);
+      body: JSON.stringify({ toolName: name, arguments: args }) }, name);
   }
   assert.notEqual(requests[2].key, requests[3].key);
   assert.equal(requests.length, calls.length);
@@ -382,7 +391,6 @@ test("S12/U5: no gated tool follows a direct-write or confirm redirect", async t
     ...proposals,
     ["update_sinking_fund", { fundId: id, ifMatch: '"7"', body: { name: "Reserve" } }],
     ["withdraw_from_fund", { fundId: id, body: { accountId: override, amount, reason: "Goal reached" } }],
-    ["scan_receipt", { body: { file: "synthetic fixture" } }],
   ];
   let status, location;
   const { call, requests } = await fixture(t, (req, res) => {

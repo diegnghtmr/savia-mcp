@@ -193,8 +193,11 @@ test("remote HTTP uses SDK streaming HTTP with request-local bearer and no direc
   };
   const [first, second] = await Promise.all([connect(fake.token), connect(secondToken)]);
   const { tools } = await first.listTools();
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 28);
   assert.ok(tools.some(tool => tool.name === "get_debt_projection"));
+  assert.equal(tools.some(tool => tool.name === "scan_receipt"), false);
+  assert.deepEqual(await first.callTool({ name: "scan_receipt", arguments: { body: { file: "synthetic fixture" } } }),
+    toolError("Unknown tool."));
   assert.deepEqual(await first.callTool({ name: "list_accounts" }), { content: [{ type: "text", text: '{"ok":true,"echo":"Bearer [redacted]"}' }] });
   const body = { name: "Envelope", type: "cash", currency: "USD" };
   const key = "f532b1d5-1952-4eb8-8cd1-9a150bff2a06";

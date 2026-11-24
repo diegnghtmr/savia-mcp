@@ -1,14 +1,20 @@
 # Savia MCP
 
-Local stdio server with 29 tools generated from the pinned Savia OpenAPI authority
-(`8f1ce12`): 14 reads, including `get_debt_projection` (`budgets:read`), and 15
+Local stdio server with 28 tools generated from the pinned Savia OpenAPI authority
+(`8f1ce12`): 14 reads, including `get_debt_projection` (`budgets:read`), and 14
 approval-gated tools. Read tools call their annotated endpoints, including three
 POST operations classified as reads. Approval-gated tools only submit `POST
 /v1/mcp/proposals`; they never call a direct write route or confirm an approval.
 The result includes the backend's pending approval ID, preview, expiry and status.
-Review and confirm in Savia web or mobile. The backend may reject proposals for
-annotated tools it does not yet implement (including `scan_receipt`,
-`update_sinking_fund`, and `withdraw_from_fund` in the U4 backend).
+Review and confirm in Savia web or mobile. Older backends (such as U4) may
+reject proposals for `update_sinking_fund` and `withdraw_from_fund`.
+
+The generator deliberately excludes `scan_receipt`, so neither local stdio nor
+remote Streamable HTTP advertises it. OpenAPI defines it as a multipart upload,
+but the JSON proposal contract has no way to represent the file and a storage
+upload cannot be rolled back with approval execution. The backend rejects these
+proposals until the contract defines a staged upload reference and its storage
+lifecycle.
 
 ## Local stdio
 
