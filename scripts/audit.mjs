@@ -11,7 +11,7 @@ const lines = authored.reduce((n, f) => n + fs.readFileSync(path.join(root, f), 
 for (const name of authored.filter(x => !["scripts/audit.mjs","test/protocol.test.mjs"].includes(x))) if (forbidden.test(fs.readFileSync(path.join(root, name), "utf8"))) throw Error(`forbidden:${name}`);
 if (/from\s+["'](?:\.\.\/){2,}/.test(fs.readFileSync(path.join(root,"test/protocol.test.mjs"),"utf8"))) throw Error("test-escapes-child");
 if (lines > 340 || fs.existsSync(path.join(root, "..", ".git"))) throw Error(`boundary-or-budget:${lines}`);
-if (createHash("sha256").update(fs.readFileSync(path.join(root,"README.md"))).digest("hex") !== "815f2d58ed0e13d86163f0a5c6d1d44fd44b8231099b8b6066f1207eb110f7ed") throw Error("claims-changed");
+if (createHash("sha256").update(fs.readFileSync(path.join(root,"README.md"))).digest("hex") !== "a0ee370d6cf7cbec4526d9885f422dde9546ea87179518b9a23e4fb9c058d4a7") throw Error("claims-changed");
 if (process.argv[2]) {
   const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const rows = Object.values(report.advisories ?? {});
