@@ -7,9 +7,7 @@ annotated read endpoints, including three POST operations classified as reads.
 Approval-gated tools only submit `POST /v1/mcp/proposals`; they never call a
 direct write route or confirm an approval. The result includes the backend's
 pending approval ID, preview, expiry and status. Review and confirm in Savia web
-or mobile. The integrated backend does not yet execute proposals for
-`update_sinking_fund` or `withdraw_from_fund`; both remain advertised while
-backend support is in progress.
+or mobile.
 
 The generator deliberately excludes `scan_receipt`, so neither local stdio nor
 remote Streamable HTTP advertises it. OpenAPI defines it as a multipart upload,
@@ -17,6 +15,13 @@ but the JSON proposal contract has no way to represent the file and a storage
 upload cannot be rolled back with approval execution. The backend rejects these
 proposals until the contract defines a staged upload reference and its storage
 lifecycle.
+
+## Repositories
+
+- [savia-web](https://github.com/diegnghtmr/savia-web) — web app and account setup.
+- [savia-mobile](https://github.com/diegnghtmr/savia-mobile) — Expo mobile app.
+- [savia-backend](https://github.com/diegnghtmr/savia-backend) — HTTP API and background worker.
+- [savia-cli](https://github.com/diegnghtmr/savia-cli) — command-line client.
 
 ## Local stdio
 
@@ -100,3 +105,7 @@ Argument validation rejects undeclared properties (including an own `__proto__`
 key) and counts string lengths in Unicode characters as OpenAPI does.
 
 The process exits 0 on EOF, 130 on SIGINT, and 143 on SIGTERM.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

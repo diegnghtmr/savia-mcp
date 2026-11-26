@@ -5,7 +5,7 @@ const sources = fs.readdirSync(path.join(root, "src"), { recursive: true, withFi
   .filter(entry => entry.isFile()).map(entry => path.relative(root, path.join(entry.parentPath, entry.name))).sort();
 const tests = ["test/protocol.test.mjs", "test/tools.test.mjs", "test/remote.test.mjs", "test/read-tools.mjs"];
 const paths = [".gitignore", ".mise.toml", ".npmrc", "package.json", "pnpm-lock.yaml", "tsconfig.json",
-  ".github/workflows/ci.yml", "README.md", "scripts/audit.mjs", "scripts/generate-tools.mjs", ...sources, ...tests];
+  ".github/workflows/ci.yml", "LICENSE", "README.md", "scripts/audit.mjs", "scripts/generate-tools.mjs", ...sources, ...tests];
 const forbiddenNetwork = /["'](?:node:)?(?:net|https?|tls|dgram)["']|\b(?:fetch|WebSocket)\b/i;
 const escapes = /from\s+["'](?:\.\.\/){2,}/;
 for (const name of paths) if (!fs.existsSync(path.join(root, name))) throw Error(`missing:${name}`);
